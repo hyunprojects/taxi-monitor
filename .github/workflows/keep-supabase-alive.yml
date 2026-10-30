@@ -1,0 +1,18 @@
+name: Keep Supabase Alive
+
+on:
+  schedule:
+    # Runs at 12:00 UTC every 3 days. (Cron format: minute hour day-of-month month day-of-week)
+    # */3 means every 3rd day. 
+    - cron: '0 12 */3 * *' 
+  workflow_dispatch: # This line adds a "Run workflow" button on GitHub for manual testing
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase Database
+        run: |
+          curl -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/drivers?select=*&limit=1" \
+          -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+          -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}"
