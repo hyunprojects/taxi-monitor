@@ -123,7 +123,7 @@ function App() {
             .from('profiles')
             .select('id, full_name')
             .eq('is_admin', false)
-            .eq('approved', true)
+            // Removed .eq('approved', true) so pending accounts show up too
           setAllSupervisors(osList || [])
         }
 
@@ -173,8 +173,27 @@ function App() {
     }
     
     const { data, error } = await query
-    if (error) return fail(`Could not load drivers: ${error.message}`)
+    if (error) {
+      console.error("Error loading drivers:", error)
+      return fail(`Could not load drivers: ${error.message}`)
+    }
     setDrivers(data || [])
+  }
+
+  // Fetch transactions based on viewingOs
+  async function fetchTransactions() {
+    let query = supabase.from('transactions').select('*, drivers(name)').order('transaction_date', { ascending: false })
+    
+    if (viewingOs !== 'all') {
+      query = query.eq('user_id', viewingOs)
+    }
+    
+    const { data, error } = await query
+    if (error) {
+      console.error("Error loading transactions:", error)
+      return fail(`Could not load transactions: ${error.message}`)
+    }
+    setTransactions(data || [])
   }
 
   // Fetch transactions based on viewingOs
