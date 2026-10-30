@@ -4,7 +4,6 @@ import logo from './assets/neminstco.png'
 import './App.css'
 
 const CURRENCY = '₱'
-// UPDATED CATEGORIES
 const EXPENSE_CATEGORIES = ['Cash Advance', 'Others']
 const RANGES = [
   { key: 'today', label: 'Today' },
@@ -44,6 +43,7 @@ function App() {
   // --- APPROVAL STATE ---
   const [isApproved, setIsApproved] = useState(false)
   const [checkingApproval, setCheckingApproval] = useState(true)
+  const [osName, setOsName] = useState('')
 
   // --- APP STATE ---
   const [drivers, setDrivers] = useState([])
@@ -63,7 +63,7 @@ function App() {
   const [selectedDriver, setSelectedDriver] = useState('')
   const [amount, setAmount] = useState('')
   const [category, setCategory] = useState(EXPENSE_CATEGORIES[0])
-  const [customReason, setCustomReason] = useState('') // NEW: For the typed reason
+  const [customReason, setCustomReason] = useState('')
   const [note, setNote] = useState('')
 
   // --- EDIT MODAL ---
@@ -105,7 +105,7 @@ function App() {
       
       const { data, error } = await supabase
         .from('profiles')
-        .select('approved')
+        .select('approved, full_name')
         .eq('id', session.user.id)
         .maybeSingle() 
 
@@ -115,6 +115,8 @@ function App() {
       } else if (data) {
         const isUserApproved = data.approved === true
         setIsApproved(isUserApproved)
+        setOsName(data.full_name || 'Supervisor')
+        
         if (isUserApproved) load() 
       } else {
         setIsApproved(false)
@@ -142,17 +144,26 @@ function App() {
     setLoading(false)
   }
 
+  // Fetch ONLY this OS's drivers
   async function fetchDrivers() {
-    const { data, error } = await supabase.from('drivers').select('*').order('name')
+    const { data, error } = await supabase
+      .from('drivers')
+      .select('*')
+      .eq('user_id', session.user.id) 
+      .order('name')
+      
     if (error) return fail(`Could not load drivers: ${error.message}`)
     setDrivers(data || [])
   }
 
+  // Fetch ONLY this OS's transactions
   async function fetchTransactions() {
     const { data, error } = await supabase
       .from('transactions')
       .select('*, drivers(name)')
+      .eq('user_id', session.user.id) 
       .order('transaction_date', { ascending: false })
+      
     if (error) return fail(`Could not load transactions: ${error.message}`)
     setTransactions(data || [])
   }
@@ -181,12 +192,15 @@ function App() {
     e.preventDefault()
     const name = driverName.trim()
     if (!name) return
-    if (drivers.some((d) => d.name.toLowerCase() === name.toLowerCase())) return fail(`${name} is already on the list.`)
+    if (drivers.some((d) => d.name.toLowerCase() === name.toLowerCase())) return fail(`${name} is already on your list.`)
 
-    const { error } = await supabase.from('drivers').insert({ name, user_id: session.user.id })
+    const { error } = await supabase.from('drivers').insert({ 
+      name, 
+      user_id: session.user.id 
+    })
     if (error) return fail(error.message)
     setDriverName('')
-    ok(`${name} added.`)
+    ok(`${name} added to your fleet.`)
     fetchDrivers()
   }
 
@@ -204,7 +218,6 @@ function App() {
     const value = parseFloat(amount)
     if (!selectedDriver || !value || value <= 0) return fail('Choose a driver and enter an amount above zero.')
 
-    // NEW: If category is 'Others', save the custom reason in the note column. Otherwise use the standard note.
     const finalNote = type === 'expense' && category === 'Others' 
       ? customReason.trim() 
       : note.trim() || null
@@ -221,7 +234,7 @@ function App() {
     
     setAmount('')
     setNote('')
-    setCustomReason('') // Reset custom reason
+    setCustomReason('')
     
     ok(type === 'income' ? `Fare of ${money(value)} recorded.` : `Expense of ${money(value)} recorded.`)
     fetchTransactions()
@@ -373,12 +386,10 @@ function App() {
   if (!session) {
     return (
       <div className="auth-container">
-        {/* Left side: NEMINTSCO logo panel */}
         <aside className="auth-brand">
           <img src={logo} alt="NEMINTSCO, powered by Green GSM" />
         </aside>
 
-        {/* Right side: form */}
         <div className="auth-panel">
           <div className="auth-card">
             <h1>{isLogin ? 'Welcome Back' : 'Create New Account'}</h1>
@@ -393,7 +404,7 @@ function App() {
               {!isLogin && (
                 <input
                   type="text"
-                  placeholder="Full name"
+                  placeholder="Full name (e.g. Sir Aldrin)"
                   aria-label="Full name"
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
@@ -403,7 +414,6 @@ function App() {
               <input
                 type="email"
                 placeholder="Email address"
-                aria-label="Email address"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
@@ -411,7 +421,6 @@ function App() {
               <input
                 type="password"
                 placeholder="Password"
-                aria-label="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
@@ -420,7 +429,6 @@ function App() {
                 <input
                   type="password"
                   placeholder="Re-enter password"
-                  aria-label="Re-enter password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
@@ -459,8 +467,8 @@ function App() {
           <div className="brand">
             <img src={logo} alt="NEMINTSCO" className="brand-logo" />
             <div>
-              <h1>Taxi Revenue Monitor</h1>
-              <p>Logged in as {session.user.email}</p>
+              <h1>Dashboard: <span>{osName}</span></h1>
+              <p>Supervisor Access • {session.user.email}</p>
             </div>
           </div>
           <div className="header-actions">
@@ -474,7 +482,6 @@ function App() {
       <main className="container">
         {notice && <div className={`notice notice-${notice.kind}`}>{notice.text}</div>}
 
-        {/* Filters */}
         <section className="filters">
           <div className="segmented" role="group">
             {RANGES.map((r) => (
@@ -491,13 +498,12 @@ function App() {
             </div>
           )}
           <select value={driverFilter} onChange={(e) => setDriverFilter(e.target.value)}>
-            <option value="all">All drivers</option>
+            <option value="all">All my drivers</option>
             {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
           </select>
           <input type="search" placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} />
         </section>
 
-        {/* Stat cards */}
         <section className="stats">
           <div className="stat stat-green">
             <span className="stat-label">Revenue</span>
@@ -548,7 +554,6 @@ function App() {
                       </select>
                     </label>
                     
-                    {/* NEW: Show this input ONLY if 'Others' is selected */}
                     {category === 'Others' && (
                       <label>Specify Reason
                         <input 
@@ -562,7 +567,6 @@ function App() {
                   </>
                 )}
 
-                {/* Show the standard note only if NOT an expense, or if expense is 'Cash Advance' */}
                 {(type === 'income' || category === 'Cash Advance') && (
                   <label>Note (optional)
                     <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={type === 'income' ? "Passenger, route, plate no." : "Additional details..."} />
@@ -576,7 +580,7 @@ function App() {
             </section>
 
             <section className="card">
-              <h2>Drivers</h2>
+              <h2>My Drivers</h2>
               <form onSubmit={addDriver} className="inline-form">
                 <input value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver name" />
                 <button type="submit" className="btn btn-blue">Add driver</button>
@@ -629,7 +633,6 @@ function App() {
           </div>
         </div>
 
-        {/* History Table */}
         <section className="card">
           <div className="card-head">
             <h2>Transactions</h2>
