@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { supabase } from './supabaseClient'
+import logo from './assets/neminstco.png'
 import './App.css'
 
 const CURRENCY = '₱'
@@ -32,8 +33,10 @@ function rangeStart(key) {
 function App() {
   // --- AUTH STATE ---
   const [session, setSession] = useState(null)
+  const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [authError, setAuthError] = useState(null)
   const [isLogin, setIsLogin] = useState(true)
 
@@ -127,7 +130,12 @@ function App() {
       const { error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) setAuthError(error.message)
     } else {
-      const { error } = await supabase.auth.signUp({ email, password })
+      if (password !== confirmPassword) return setAuthError('Passwords do not match.')
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { full_name: fullName.trim() } },
+      })
       if (error) setAuthError(error.message)
       else ok('Check your email for the confirmation link!')
     }
@@ -292,21 +300,76 @@ function App() {
     return (
       <div className="auth-container">
         {/* Left side: NEMINTSCO logo panel */}
-        <aside className="auth-brand" role="img" aria-label="NEMINTSCO, powered by Green GSM" />
+        <aside className="auth-brand">
+          <img src={logo} alt="NEMINTSCO, powered by Green GSM" />
+        </aside>
 
-        {/* Right side: login form */}
+        {/* Right side: form */}
         <div className="auth-panel">
           <div className="auth-card">
-            <h1>Taxi Monitor</h1>
-            <p>{isLogin ? 'Welcome back!' : 'Create an account to start.'}</p>
+            <h1>{isLogin ? 'Welcome Back' : 'Create New Account'}</h1>
+            <p>
+              {isLogin
+                ? 'Log in to monitor your fleet’s revenue, expenses and driver performance.'
+                : 'Create your account to track fares, expenses and driver performance with ease.'}
+            </p>
             {authError && <div className="notice notice-error">{authError}</div>}
-            <form onSubmit={handleAuth} className="form">
-              <label>Email<input type="email" value={email} onChange={e => setEmail(e.target.value)} required /></label>
-              <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required /></label>
-              <button type="submit" className="btn btn-blue">{isLogin ? 'Log In' : 'Sign Up'}</button>
+
+            <form onSubmit={handleAuth} className="auth-form">
+              {!isLogin && (
+                <input
+                  type="text"
+                  placeholder="Full name"
+                  aria-label="Full name"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  required
+                />
+              )}
+              <input
+                type="email"
+                placeholder="Email address"
+                aria-label="Email address"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
+              <input
+                type="password"
+                placeholder="Password"
+                aria-label="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+              {!isLogin && (
+                <input
+                  type="password"
+                  placeholder="Re-enter password"
+                  aria-label="Re-enter password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  required
+                />
+              )}
+              <button type="submit" className="auth-submit">{isLogin ? 'Log In' : 'Submit'}</button>
             </form>
-            <button className="link-btn" onClick={() => { setIsLogin(!isLogin); setAuthError(null) }}>
-              {isLogin ? "Don't have an account? Sign up" : "Already have an account? Log in"}
+          </div>
+
+          <div className="auth-tabs" role="tablist">
+            <button
+              type="button"
+              className={!isLogin ? 'active' : ''}
+              onClick={() => { setIsLogin(false); setAuthError(null) }}
+            >
+              Sign Up
+            </button>
+            <button
+              type="button"
+              className={isLogin ? 'active' : ''}
+              onClick={() => { setIsLogin(true); setAuthError(null) }}
+            >
+              Log In
             </button>
           </div>
         </div>
@@ -319,9 +382,12 @@ function App() {
     <div className="app">
       <header className="topbar">
         <div className="topbar-inner">
-          <div>
-            <h1>Taxi Revenue Monitor</h1>
-            <p>Logged in as {session.user.email}</p>
+          <div className="brand">
+            <img src={logo} alt="NEMINTSCO" className="brand-logo" />
+            <div>
+              <h1>Taxi Revenue Monitor</h1>
+              <p>Logged in as {session.user.email}</p>
+            </div>
           </div>
           <div className="header-actions">
             <button className="btn btn-ghost" onClick={exportCsv} disabled={!filtered.length}>Export CSV</button>
