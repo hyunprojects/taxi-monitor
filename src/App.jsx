@@ -40,6 +40,10 @@ function App() {
   const [authError, setAuthError] = useState(null)
   const [isLogin, setIsLogin] = useState(true)
 
+  // --- APPROVAL STATE ---
+  const [isApproved, setIsApproved] = useState(false)
+  const [checkingApproval, setCheckingApproval] = useState(true)
+
   // --- APP STATE ---
   const [drivers, setDrivers] = useState([])
   const [transactions, setTransactions] = useState([])
@@ -87,11 +91,36 @@ function App() {
     localStorage.setItem('theme', isDark ? 'dark' : 'light')
   }, [isDark])
 
-  // 3. Load Data (Only when logged in)
+  // 3. Check Approval & Load Data
   useEffect(() => {
-    if (session) load()
+    async function checkStatus() {
+      if (!session) {
+        setCheckingApproval(false)
+        return
+      }
+      
+      setCheckingApproval(true)
+      // Check if the user's profile is approved
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('approved')
+        .eq('id', session.user.id)
+        .single()
+
+      if (error || !data) {
+        // If no profile is found yet (e.g. trigger delay), treat as not approved
+        setIsApproved(false) 
+      } else {
+        setIsApproved(data.approved)
+        if (data.approved) load() // Only load dashboard data if approved
+      }
+      setCheckingApproval(false)
+    }
+    
+    checkStatus()
   }, [session])
 
+  // 4. Notices Auto-dismiss
   useEffect(() => {
     if (!notice) return
     const t = setTimeout(() => setNotice(null), 3500)
@@ -148,7 +177,6 @@ function App() {
     if (!name) return
     if (drivers.some((d) => d.name.toLowerCase() === name.toLowerCase())) return fail(`${name} is already on the list.`)
 
-    // Add user_id so Supabase knows who owns this driver
     const { error } = await supabase.from('drivers').insert({ name, user_id: session.user.id })
     if (error) return fail(error.message)
     setDriverName('')
@@ -176,7 +204,7 @@ function App() {
       type,
       category: type === 'expense' ? category : null,
       note: note.trim() || null,
-      user_id: session.user.id // Add user_id
+      user_id: session.user.id
     })
     if (error) return fail(error.message)
     setAmount('')
@@ -293,6 +321,38 @@ function App() {
     a.download = `taxi-report-${dayKey(new Date())}.csv`
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  // --- RENDER: LOADING SCREEN ---
+  if (session && checkingApproval) {
+    return (
+      <div className="auth-container">
+        <div className="auth-card" style={{ textAlign: 'center', color: '#fff' }}>
+          <h1>Checking Account...</h1>
+        </div>
+      </div>
+    )
+  }
+
+  // --- RENDER: PENDING APPROVAL SCREEN ---
+  if (session && !isApproved) {
+    return (
+      <div className="auth-container">
+        <div className="auth-card" style={{ textAlign: 'center' }}>
+          <h1>Pending Approval</h1>
+          <p style={{ marginTop: '20px', marginBottom: '30px' }}>
+            Your account has been created successfully, but an administrator needs to approve it before you can access the dashboard.
+          </p>
+          <button 
+            type="button" 
+            className="auth-submit" 
+            onClick={() => supabase.auth.signOut()}
+          >
+            Log Out
+          </button>
+        </div>
+      </div>
+    )
   }
 
   // --- RENDER: LOGIN SCREEN ---
