@@ -100,20 +100,29 @@ function App() {
       }
       
       setCheckingApproval(true)
-      // Check if the user's profile is approved
+      
       const { data, error } = await supabase
         .from('profiles')
         .select('approved')
         .eq('id', session.user.id)
-        .single()
+        .maybeSingle() 
 
-      if (error || !data) {
-        // If no profile is found yet (e.g. trigger delay), treat as not approved
-        setIsApproved(false) 
+      if (error) {
+        console.error("Supabase error fetching profile:", error)
+        setIsApproved(false)
+      } else if (data) {
+        const isUserApproved = data.approved === true
+        console.log("Profile found. Approved status is:", isUserApproved)
+        setIsApproved(isUserApproved)
+        
+        if (isUserApproved) {
+          load() 
+        }
       } else {
-        setIsApproved(data.approved)
-        if (data.approved) load() // Only load dashboard data if approved
+        console.warn("No profile row found for this user ID.")
+        setIsApproved(false)
       }
+      
       setCheckingApproval(false)
     }
     
