@@ -31,19 +31,16 @@ function rangeStart(key) {
 }
 
 function App() {
-  // --- AUTH STATE ---
+  // --- AUTH & ADMIN STATE ---
   const [session, setSession] = useState(null)
-  const [fullName, setFullName] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
+  const [profile, setProfile] = useState(null) // Stores { approved, full_name, is_admin }
   const [authError, setAuthError] = useState(null)
   const [isLogin, setIsLogin] = useState(true)
-
-  // --- APPROVAL STATE ---
-  const [isApproved, setIsApproved] = useState(false)
   const [checkingApproval, setCheckingApproval] = useState(true)
-  const [osName, setOsName] = useState('')
+
+  // --- ADMIN VIEW STATE ---
+  const [allSupervisors, setAllSupervisors] = useState([]) // For admin dropdown
+  const [viewingOs, setViewingOs] = useState('all') // 'all' or a specific user_id
 
   // --- APP STATE ---
   const [drivers, setDrivers] = useState([])
@@ -58,6 +55,11 @@ function App() {
   })
 
   // --- FORMS ---
+  const [fullName, setFullName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  
   const [driverName, setDriverName] = useState('')
   const [type, setType] = useState('income')
   const [selectedDriver, setSelectedDriver] = useState('')
@@ -93,7 +95,7 @@ function App() {
     localStorage.setItem('theme', isDark ? 'dark' : 'light')
   }, [isDark])
 
-  // 3. Check Approval & Load Data
+  // 3. Check Approval & Load Profile
   useEffect(() => {
     async function checkStatus() {
       if (!session) {
@@ -105,21 +107,32 @@ function App() {
       
       const { data, error } = await supabase
         .from('profiles')
-        .select('approved, full_name')
+        .select('approved, full_name, is_admin')
         .eq('id', session.user.id)
         .maybeSingle() 
 
       if (error) {
         console.error("Supabase error fetching profile:", error)
-        setIsApproved(false)
+        setProfile(null)
       } else if (data) {
-        const isUserApproved = data.approved === true
-        setIsApproved(isUserApproved)
-        setOsName(data.full_name || 'Supervisor')
+        setProfile(data)
         
-        if (isUserApproved) load() 
+        // If Admin, fetch all supervisors to populate dropdown
+        if (data.is_admin) {
+          const { data: osList } = await supabase
+            .from('profiles')
+            .select('id, full_name')
+            .eq('is_admin', false)
+            .eq('approved', true)
+          setAllSupervisors(osList || [])
+        }
+
+        if (data.approved) {
+          // Default the viewing OS to the admin's own ID if not admin, or 'all' if admin
+          setViewingOs(data.is_admin ? 'all' : session.user.id)
+        }
       } else {
-        setIsApproved(false)
+        setProfile(null)
       }
       
       setCheckingApproval(false)
@@ -128,7 +141,14 @@ function App() {
     checkStatus()
   }, [session])
 
-  // 4. Notices Auto-dismiss
+  // 4. Load Data when Session or viewingOs changes
+  useEffect(() => {
+    if (session && profile?.approved) {
+      load()
+    }
+  }, [session, profile, viewingOs])
+
+  // 5. Notices Auto-dismiss
   useEffect(() => {
     if (!notice) return
     const t = setTimeout(() => setNotice(null), 3500)
@@ -144,26 +164,28 @@ function App() {
     setLoading(false)
   }
 
-  // Fetch ONLY this OS's drivers
+  // Fetch drivers based on viewingOs
   async function fetchDrivers() {
-    const { data, error } = await supabase
-      .from('drivers')
-      .select('*')
-      .eq('user_id', session.user.id) 
-      .order('name')
-      
+    let query = supabase.from('drivers').select('*').order('name')
+    
+    if (viewingOs !== 'all') {
+      query = query.eq('user_id', viewingOs)
+    }
+    
+    const { data, error } = await query
     if (error) return fail(`Could not load drivers: ${error.message}`)
     setDrivers(data || [])
   }
 
-  // Fetch ONLY this OS's transactions
+  // Fetch transactions based on viewingOs
   async function fetchTransactions() {
-    const { data, error } = await supabase
-      .from('transactions')
-      .select('*, drivers(name)')
-      .eq('user_id', session.user.id) 
-      .order('transaction_date', { ascending: false })
-      
+    let query = supabase.from('transactions').select('*, drivers(name)').order('transaction_date', { ascending: false })
+    
+    if (viewingOs !== 'all') {
+      query = query.eq('user_id', viewingOs)
+    }
+    
+    const { data, error } = await query
     if (error) return fail(`Could not load transactions: ${error.message}`)
     setTransactions(data || [])
   }
@@ -192,15 +214,21 @@ function App() {
     e.preventDefault()
     const name = driverName.trim()
     if (!name) return
-    if (drivers.some((d) => d.name.toLowerCase() === name.toLowerCase())) return fail(`${name} is already on your list.`)
+    
+    // If Admin is viewing 'All', they must select a specific OS first to add a driver
+    if (viewingOs === 'all') {
+       return fail('Please select a specific Supervisor from the dropdown before adding a driver.')
+    }
+
+    if (drivers.some((d) => d.name.toLowerCase() === name.toLowerCase() && d.user_id === viewingOs)) return fail(`${name} is already on this list.`)
 
     const { error } = await supabase.from('drivers').insert({ 
       name, 
-      user_id: session.user.id 
+      user_id: viewingOs 
     })
     if (error) return fail(error.message)
     setDriverName('')
-    ok(`${name} added to your fleet.`)
+    ok(`${name} added to fleet.`)
     fetchDrivers()
   }
 
@@ -218,6 +246,10 @@ function App() {
     const value = parseFloat(amount)
     if (!selectedDriver || !value || value <= 0) return fail('Choose a driver and enter an amount above zero.')
 
+    if (viewingOs === 'all') {
+      return fail('Please select a specific Supervisor from the dropdown before recording a transaction.')
+    }
+
     const finalNote = type === 'expense' && category === 'Others' 
       ? customReason.trim() 
       : note.trim() || null
@@ -228,7 +260,7 @@ function App() {
       type,
       category: type === 'expense' ? category : null,
       note: finalNote,
-      user_id: session.user.id
+      user_id: viewingOs
     })
     if (error) return fail(error.message)
     
@@ -362,7 +394,7 @@ function App() {
   }
 
   // --- RENDER: PENDING APPROVAL SCREEN ---
-  if (session && !isApproved) {
+  if (session && profile && !profile.approved) {
     return (
       <div className="auth-container">
         <div className="auth-card" style={{ textAlign: 'center' }}>
@@ -460,6 +492,11 @@ function App() {
   }
 
   // --- RENDER: DASHBOARD ---
+  const isViewingAll = viewingOs === 'all'
+  const viewTitle = isViewingAll 
+    ? 'All Operations' 
+    : (viewingOs === session.user.id ? profile?.full_name : allSupervisors.find(s => s.id === viewingOs)?.full_name)
+
   return (
     <div className="app">
       <header className="topbar">
@@ -467,11 +504,25 @@ function App() {
           <div className="brand">
             <img src={logo} alt="NEMINTSCO" className="brand-logo" />
             <div>
-              <h1>Dashboard: <span>{osName}</span></h1>
-              <p>Supervisor Access • {session.user.email}</p>
+              <h1>Dashboard: <span>{viewTitle}</span></h1>
+              <p>{profile?.is_admin ? 'Admin Access' : 'Supervisor Access'} • {session.user.email}</p>
             </div>
           </div>
           <div className="header-actions">
+            {/* ADMIN DROPDOWN */}
+            {profile?.is_admin && (
+              <select 
+                className="admin-select" 
+                value={viewingOs} 
+                onChange={(e) => setViewingOs(e.target.value)}
+              >
+                <option value="all">View All Supervisors</option>
+                {allSupervisors.map(os => (
+                  <option key={os.id} value={os.id}>{os.full_name || 'Unnamed OS'}</option>
+                ))}
+              </select>
+            )}
+
             <button className="btn btn-ghost" onClick={exportCsv} disabled={!filtered.length}>Export CSV</button>
             <button className="btn btn-ghost theme-toggle" onClick={() => setIsDark(!isDark)}>{isDark ? '☀️ Light' : '🌙 Dark'}</button>
             <button className="btn btn-ghost" onClick={() => supabase.auth.signOut()}>Log Out</button>
@@ -481,6 +532,12 @@ function App() {
 
       <main className="container">
         {notice && <div className={`notice notice-${notice.kind}`}>{notice.text}</div>}
+
+        {isViewingAll && (
+          <div className="admin-warning">
+            ⚠️ You are viewing the combined data of all Supervisors. To add drivers or record transactions, please select a specific Supervisor from the top right dropdown.
+          </div>
+        )}
 
         <section className="filters">
           <div className="segmented" role="group">
@@ -529,76 +586,96 @@ function App() {
 
         <div className="grid">
           <div className="col">
-            <section className="card">
-              <h2>Record transaction</h2>
-              <div className="toggle" role="group">
-                <button type="button" className={type === 'income' ? 'on-green' : ''} onClick={() => setType('income')}>Fare</button>
-                <button type="button" className={type === 'expense' ? 'on-red' : ''} onClick={() => setType('expense')}>Expense</button>
-              </div>
-              <form onSubmit={addTransaction} className="form">
-                <label>Driver
-                  <select value={selectedDriver} onChange={(e) => setSelectedDriver(e.target.value)}>
-                    <option value="">Select driver</option>
-                    {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                  </select>
-                </label>
-                <label>Amount ({CURRENCY})
-                  <input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
-                </label>
-                
-                {type === 'expense' && (
-                  <>
-                    <label>Category
-                      <select value={category} onChange={(e) => setCategory(e.target.value)}>
-                        {EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+            {/* HIDE FORMS IF ADMIN IS VIEWING ALL */}
+            {!isViewingAll && (
+              <>
+                <section className="card">
+                  <h2>Record transaction</h2>
+                  <div className="toggle" role="group">
+                    <button type="button" className={type === 'income' ? 'on-green' : ''} onClick={() => setType('income')}>Fare</button>
+                    <button type="button" className={type === 'expense' ? 'on-red' : ''} onClick={() => setType('expense')}>Expense</button>
+                  </div>
+                  <form onSubmit={addTransaction} className="form">
+                    <label>Driver
+                      <select value={selectedDriver} onChange={(e) => setSelectedDriver(e.target.value)}>
+                        <option value="">Select driver</option>
+                        {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
                       </select>
                     </label>
+                    <label>Amount ({CURRENCY})
+                      <input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
+                    </label>
                     
-                    {category === 'Others' && (
-                      <label>Specify Reason
-                        <input 
-                          value={customReason} 
-                          onChange={(e) => setCustomReason(e.target.value)} 
-                          placeholder="e.g. Car wash, parking ticket..." 
-                          required 
-                        />
+                    {type === 'expense' && (
+                      <>
+                        <label>Category
+                          <select value={category} onChange={(e) => setCategory(e.target.value)}>
+                            {EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+                          </select>
+                        </label>
+                        
+                        {category === 'Others' && (
+                          <label>Specify Reason
+                            <input 
+                              value={customReason} 
+                              onChange={(e) => setCustomReason(e.target.value)} 
+                              placeholder="e.g. Car wash, parking ticket..." 
+                              required 
+                            />
+                          </label>
+                        )}
+                      </>
+                    )}
+
+                    {(type === 'income' || category === 'Cash Advance') && (
+                      <label>Note (optional)
+                        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={type === 'income' ? "Passenger, route, plate no." : "Additional details..."} />
                       </label>
                     )}
-                  </>
-                )}
 
-                {(type === 'income' || category === 'Cash Advance') && (
-                  <label>Note (optional)
-                    <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={type === 'income' ? "Passenger, route, plate no." : "Additional details..."} />
-                  </label>
-                )}
+                    <button type="submit" className={`btn ${type === 'income' ? 'btn-green' : 'btn-red'}`}>
+                      {type === 'income' ? 'Record fare' : 'Record expense'}
+                    </button>
+                  </form>
+                </section>
 
-                <button type="submit" className={`btn ${type === 'income' ? 'btn-green' : 'btn-red'}`}>
-                  {type === 'income' ? 'Record fare' : 'Record expense'}
-                </button>
-              </form>
-            </section>
+                <section className="card">
+                  <h2>My Drivers</h2>
+                  <form onSubmit={addDriver} className="inline-form">
+                    <input value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver name" />
+                    <button type="submit" className="btn btn-blue">Add driver</button>
+                  </form>
+                  {drivers.length === 0 ? (
+                    <p className="empty">No drivers yet.</p>
+                  ) : (
+                    <ul className="driver-list">
+                      {drivers.map((d) => (
+                        <li key={d.id}>
+                          <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
+                          <span className="grow">{d.name}</span>
+                          <button className="link-red" onClick={() => deleteDriver(d)}>Delete</button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </>
+            )}
 
-            <section className="card">
-              <h2>My Drivers</h2>
-              <form onSubmit={addDriver} className="inline-form">
-                <input value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver name" />
-                <button type="submit" className="btn btn-blue">Add driver</button>
-              </form>
-              {drivers.length === 0 ? (
-                <p className="empty">No drivers yet.</p>
-              ) : (
-                <ul className="driver-list">
-                  {drivers.map((d) => (
-                    <li key={d.id}>
-                      <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
-                      <span className="grow">{d.name}</span>
-                      <button className="link-red" onClick={() => deleteDriver(d)}>Delete</button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+            {isViewingAll && (
+               <section className="card">
+                 <h2>Total Drivers Overview</h2>
+                 <p className="muted">Showing all drivers under all supervisors.</p>
+                 <ul className="driver-list">
+                    {drivers.map((d) => (
+                      <li key={d.id}>
+                        <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
+                        <span className="grow">{d.name}</span>
+                      </li>
+                    ))}
+                  </ul>
+               </section>
+            )}
           </div>
 
           <div className="col">
@@ -657,8 +734,12 @@ function App() {
                         </td>
                         <td className={`num ${isExpense ? 'neg' : 'pos'}`}>{isExpense ? '−' : '+'}{money(t.amount)}</td>
                         <td className="num">
-                          <button className="link-blue" onClick={() => setEditingTx(t)}>Edit</button>
-                          <button className="link-red" onClick={() => deleteTransaction(t.id)}>Delete</button>
+                          {!isViewingAll && (
+                            <>
+                              <button className="link-blue" onClick={() => setEditingTx(t)}>Edit</button>
+                              <button className="link-red" onClick={() => deleteTransaction(t.id)}>Delete</button>
+                            </>
+                          )}
                         </td>
                       </tr>
                     )
