@@ -4,7 +4,8 @@ import logo from './assets/neminstco.png'
 import './App.css'
 
 const CURRENCY = '₱'
-const EXPENSE_CATEGORIES = ['Fuel', 'Maintenance', 'Toll / Parking', 'Other']
+// UPDATED CATEGORIES
+const EXPENSE_CATEGORIES = ['Cash Advance', 'Others']
 const RANGES = [
   { key: 'today', label: 'Today' },
   { key: '7d', label: '7 days' },
@@ -62,6 +63,7 @@ function App() {
   const [selectedDriver, setSelectedDriver] = useState('')
   const [amount, setAmount] = useState('')
   const [category, setCategory] = useState(EXPENSE_CATEGORIES[0])
+  const [customReason, setCustomReason] = useState('') // NEW: For the typed reason
   const [note, setNote] = useState('')
 
   // --- EDIT MODAL ---
@@ -112,14 +114,9 @@ function App() {
         setIsApproved(false)
       } else if (data) {
         const isUserApproved = data.approved === true
-        console.log("Profile found. Approved status is:", isUserApproved)
         setIsApproved(isUserApproved)
-        
-        if (isUserApproved) {
-          load() 
-        }
+        if (isUserApproved) load() 
       } else {
-        console.warn("No profile row found for this user ID.")
         setIsApproved(false)
       }
       
@@ -207,17 +204,25 @@ function App() {
     const value = parseFloat(amount)
     if (!selectedDriver || !value || value <= 0) return fail('Choose a driver and enter an amount above zero.')
 
+    // NEW: If category is 'Others', save the custom reason in the note column. Otherwise use the standard note.
+    const finalNote = type === 'expense' && category === 'Others' 
+      ? customReason.trim() 
+      : note.trim() || null
+
     const { error } = await supabase.from('transactions').insert({
       driver_id: selectedDriver,
       amount: value,
       type,
       category: type === 'expense' ? category : null,
-      note: note.trim() || null,
+      note: finalNote,
       user_id: session.user.id
     })
     if (error) return fail(error.message)
+    
     setAmount('')
     setNote('')
+    setCustomReason('') // Reset custom reason
+    
     ok(type === 'income' ? `Fare of ${money(value)} recorded.` : `Expense of ${money(value)} recorded.`)
     fetchTransactions()
   }
@@ -502,7 +507,7 @@ function App() {
           <div className="stat stat-red">
             <span className="stat-label">Expenses</span>
             <strong>{money(stats.expense)}</strong>
-            <small>Fuel, repairs, tolls</small>
+            <small>Cash advances, others</small>
           </div>
           <div className={`stat ${stats.net >= 0 ? 'stat-blue' : 'stat-red'}`}>
             <span className="stat-label">Net income</span>
@@ -534,16 +539,36 @@ function App() {
                 <label>Amount ({CURRENCY})
                   <input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
                 </label>
+                
                 {type === 'expense' && (
-                  <label>Category
-                    <select value={category} onChange={(e) => setCategory(e.target.value)}>
-                      {EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-                    </select>
+                  <>
+                    <label>Category
+                      <select value={category} onChange={(e) => setCategory(e.target.value)}>
+                        {EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+                      </select>
+                    </label>
+                    
+                    {/* NEW: Show this input ONLY if 'Others' is selected */}
+                    {category === 'Others' && (
+                      <label>Specify Reason
+                        <input 
+                          value={customReason} 
+                          onChange={(e) => setCustomReason(e.target.value)} 
+                          placeholder="e.g. Car wash, parking ticket..." 
+                          required 
+                        />
+                      </label>
+                    )}
+                  </>
+                )}
+
+                {/* Show the standard note only if NOT an expense, or if expense is 'Cash Advance' */}
+                {(type === 'income' || category === 'Cash Advance') && (
+                  <label>Note (optional)
+                    <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={type === 'income' ? "Passenger, route, plate no." : "Additional details..."} />
                   </label>
                 )}
-                <label>Note (optional)
-                  <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Passenger, route, plate no." />
-                </label>
+
                 <button type="submit" className={`btn ${type === 'income' ? 'btn-green' : 'btn-red'}`}>
                   {type === 'income' ? 'Record fare' : 'Record expense'}
                 </button>
@@ -656,6 +681,7 @@ function App() {
               <label>Amount ({CURRENCY})
                 <input type="number" step="0.01" min="0" value={editingTx.amount} onChange={(e) => setEditingTx({ ...editingTx, amount: e.target.value })} />
               </label>
+              
               {editingTx.type === 'expense' && (
                 <label>Category
                   <select value={editingTx.category || ''} onChange={(e) => setEditingTx({ ...editingTx, category: e.target.value })}>
@@ -663,9 +689,11 @@ function App() {
                   </select>
                 </label>
               )}
-              <label>Note
+
+              <label>Note / Reason
                 <input value={editingTx.note || ''} onChange={(e) => setEditingTx({ ...editingTx, note: e.target.value })} />
               </label>
+              
               <div className="modal-actions">
                 <button type="button" className="btn btn-ghost" onClick={() => setEditingTx(null)}>Cancel</button>
                 <button type="submit" className="btn btn-blue">Save Changes</button>
