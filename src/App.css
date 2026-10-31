@@ -53,6 +53,10 @@ body {
   font-size: 1.5rem;
   letter-spacing: -0.01em;
   text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 .topbar h1 span { color: #13bcb2; }
 .topbar p {
@@ -197,8 +201,8 @@ body.dark-mode .segmented button.active { color: #fff; }
 }
 .form button { margin-top: 4px; }
 
-.inline-form { display: flex; gap: 10px; margin-bottom: 16px; }
-.inline-form input { flex: 1; }
+.inline-form { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+.inline-form input { flex: 1; min-width: 120px; }
 .inline-form button { white-space: nowrap; }
 
 /* Type toggle */
@@ -217,6 +221,22 @@ body.dark-mode .segmented button.active { color: #fff; }
   display: flex; align-items: center; gap: 12px; padding: 10px 12px;
   background: var(--bg); border-radius: 10px; font-size: 0.92rem; font-weight: 500;
 }
+
+/* NEW: Driver item hover state for clickable rows */
+.driver-item-hover {
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  border: 1px solid transparent;
+}
+.driver-item-hover:hover {
+  background: var(--blue-soft);
+  border-color: var(--blue);
+}
+body.dark-mode .driver-item-hover:hover {
+  background: #1e3a8a;
+  border-color: var(--blue);
+}
+
 .avatar {
   width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
   background: var(--blue); color: #fff; display: flex; align-items: center;
@@ -227,12 +247,18 @@ body.dark-mode .segmented button.active { color: #fff; }
 /* Link-style buttons */
 .link-red, .link-blue {
   border: 0; background: transparent; font: inherit; font-weight: 600;
-  font-size: 0.82rem; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+  font-size: 0.82rem; cursor: pointer; padding: 4px 8px; border-radius: 6px;
 }
 .link-red { color: var(--red); }
 .link-blue { color: var(--blue); }
 .link-red:hover { background: var(--red-soft); }
 .link-blue:hover { background: var(--blue-soft); }
+
+/* NEW: Ensure spacing between action buttons in table */
+td .link-red + .link-blue,
+td .link-blue + .link-red {
+  margin-left: 4px;
+}
 
 /* Chart */
 .chart { display: flex; gap: 8px; align-items: flex-end; height: 180px; padding-top: 8px; }
@@ -289,6 +315,40 @@ tbody tr:hover { background: var(--bg); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
 .modal .btn-ghost { color: var(--muted); border-color: var(--line); }
 .modal .btn-ghost:hover { background: var(--bg); }
+
+/* NEW: Driver details view spacing */
+.driver-details {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 0;
+}
+.driver-details p {
+  margin: 0;
+  font-size: 0.95rem;
+}
+.driver-details strong {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: block;
+  margin-bottom: 2px;
+}
+
+/* NEW: Back button in header */
+.back-btn {
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: opacity 0.15s;
+}
+.back-btn:hover { opacity: 0.85; }
 
 /* ===== AUTH SCREENS ===== */
 .auth-container {
