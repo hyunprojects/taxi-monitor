@@ -29,11 +29,7 @@ function rangeStart(key) {
   return null
 }
 
-/* ---------- CSV PARSER (orders.csv) ----------
-   Required columns: Driver Vehicle Plate, Sap Profile Id, Distance
-   Optional: Payment Method, Total Pay Display, Date
-   Amount used for earnings = Total Pay Display (falls back to Distance if absent)
-*/
+/* ---------- CSV PARSER (orders.csv) ---------- */
 function splitCsvLine(line) {
   const out = []
   let cur = ''
@@ -102,6 +98,18 @@ function parseCsv(text) {
   })
 }
 
+/* ---------- ✅ NEW: build a stable signature to detect duplicate imports ---------- */
+function transactionSignature({ driverId, amount, distance, paymentMethod, when, userId }) {
+  return [
+    userId,
+    driverId,
+    when || 'null',
+    Number(amount).toFixed(2),
+    Number(distance ?? 0).toFixed(2),
+    paymentMethod || 'null',
+  ].join('|')
+}
+
 /* ---------- Icons ---------- */
 const EyeIcon = ({ off }) => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -160,13 +168,12 @@ function App() {
   const [showPassword, setShowPassword] = useState(false)
   const [rememberMe, setRememberMe] = useState(() => !!localStorage.getItem('rememberedEmail'))
 
-  const [range, setRange] = useState('7d')
+  // Changed default from '7d' to 'all' since the filter UI is removed
+  const [range, setRange] = useState('all')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')
   const [driverFilter, setDriverFilter] = useState('all')
   const [search, setSearch] = useState('')
-
-  // --- NEW STATE FOR DRIVER LIST SEARCH ---
   const [driverSearch, setDriverSearch] = useState('')
 
   /* ---------- Auth bootstrap ---------- */
@@ -333,7 +340,6 @@ function App() {
     if (drivers.length === 0) { setPendingClearDrivers(false); return fail('There are no drivers to delete.') }
 
     setLoading(true)
-    // Delete transactions FIRST (in case DB has no ON DELETE CASCADE)
     const { error: txError } = await supabase.from('transactions').delete().eq('user_id', viewingOs)
     if (txError) {
       setLoading(false); setPendingClearDrivers(false)
@@ -348,7 +354,7 @@ function App() {
     load()
   }
 
-  /* ---------- CSV IMPORT (orders.csv) ---------- */
+  /* ---------- ✅ UPDATED: CSV IMPORT with duplicate protection + batched inserts ---------- */
   async function importCsv(e) {
     const input = e.target
     const file = input.files[0]
@@ -364,64 +370,105 @@ function App() {
     }
     if (!rows.length) return fail('CSV is empty.')
 
-    // 1. Fetch existing drivers to map by BOTH SAP ID and Plate Number
-    const { data: existing, error: exErr } = await supabase
-      .from('drivers').select('id, sap_profile_id, name, plate_number').eq('user_id', viewingOs)
-    if (exErr) return fail(exErr.message)
+    setLoading(true)
+    try {
+      // 1. Fetch existing drivers
+      const { data: existing, error: exErr } = await supabase
+        .from('drivers').select('id, sap_profile_id, name, plate_number').eq('user_id', viewingOs)
+      if (exErr) throw new Error(exErr.message)
 
-    // Create lookup maps for faster matching
-    const bySap = {}
-    const byPlate = {}
-    ;(existing || []).forEach(d => {
-      if (d.sap_profile_id) bySap[d.sap_profile_id] = d.id
-      if (d.plate_number) byPlate[d.plate_number.trim().toUpperCase()] = d.id
-      // Fallback: Sometimes the name field holds the plate in older auto-generated data
-      if (d.name) byPlate[d.name.trim().toUpperCase()] = d.id
-    })
-
-    const newDrivers = []
-    const seenSap = new Set()
-    const seenPlate = new Set()
-
-    // 2. Identify which drivers need to be created
-    rows.forEach(r => {
-      const plateUpper = r.plate.trim().toUpperCase()
-      const hasSap = bySap[r.sapId]
-      const hasPlate = byPlate[plateUpper]
-      if (hasSap || hasPlate) return
-      if (seenSap.has(r.sapId) || seenPlate.has(plateUpper)) return
-      seenSap.add(r.sapId)
-      seenPlate.add(plateUpper)
-      newDrivers.push({
-        user_id: viewingOs,
-        sap_profile_id: r.sapId,
-        name: r.plate,          // Fallback name
-        plate_number: r.plate,  // Save the plate number
+      const bySap = {}
+      const byPlate = {}
+      ;(existing || []).forEach(d => {
+        if (d.sap_profile_id) bySap[d.sap_profile_id] = d.id
+        if (d.plate_number) byPlate[d.plate_number.trim().toUpperCase()] = d.id
+        if (d.name) byPlate[d.name.trim().toUpperCase()] = d.id
       })
-    })
 
-    // 3. Insert only the genuinely new drivers
-    if (newDrivers.length) {
-      const { data: created, error } = await supabase.from('drivers').insert(newDrivers).select()
-      if (error) return fail(error.message)
-      created.forEach(d => {
-        bySap[d.sap_profile_id] = d.id
-        byPlate[d.plate_number.trim().toUpperCase()] = d.id
-      })
-    }
+      const newDrivers = []
+      const seenSap = new Set()
+      const seenPlate = new Set()
 
-    // 4. Build transactions using the matched IDs
-    const nowIso = new Date().toISOString()
-    let skipped = 0
-    const txns = rows
-      .map(r => {
+      rows.forEach(r => {
         const plateUpper = r.plate.trim().toUpperCase()
-        // Find driver ID by SAP ID first, then fallback to Plate Number
+        const hasSap = bySap[r.sapId]
+        const hasPlate = byPlate[plateUpper]
+        if (hasSap || hasPlate) return
+        if (seenSap.has(r.sapId) || seenPlate.has(plateUpper)) return
+        seenSap.add(r.sapId)
+        seenPlate.add(plateUpper)
+        newDrivers.push({
+          user_id: viewingOs,
+          sap_profile_id: r.sapId,
+          name: r.plate,
+          plate_number: r.plate,
+        })
+      })
+
+      // 2. Insert new drivers
+      if (newDrivers.length) {
+        const { data: created, error } = await supabase.from('drivers').insert(newDrivers).select()
+        if (error) throw new Error(error.message)
+        created.forEach(d => {
+          bySap[d.sap_profile_id] = d.id
+          if (d.plate_number) byPlate[d.plate_number.trim().toUpperCase()] = d.id
+        })
+      }
+
+      // 3. ✅ NEW: Pre-fetch existing transactions in the date window to detect duplicates
+      const nowIso = new Date().toISOString()
+      const rowDates = rows.map(r => r.when || nowIso).sort()
+      const minDate = rowDates[0]
+      const maxDate = rowDates[rowDates.length - 1]
+
+      const { data: existingTx, error: txFetchErr } = await supabase
+        .from('transactions')
+        .select('driver_id, amount, distance, payment_method, transaction_date')
+        .eq('user_id', viewingOs)
+        .gte('transaction_date', minDate)
+        .lte('transaction_date', maxDate)
+      if (txFetchErr) throw new Error(txFetchErr.message)
+
+      const existingSignatures = new Set(
+        (existingTx || []).map(t =>
+          transactionSignature({
+            userId: viewingOs,
+            driverId: t.driver_id,
+            amount: t.amount,
+            distance: t.distance,
+            paymentMethod: t.payment_method,
+            when: t.transaction_date,
+          })
+        )
+      )
+
+      // 4. Build transactions, skipping duplicates
+      let skipped = 0
+      let duplicates = 0
+      const seenInThisImport = new Set()
+      const txns = []
+
+      for (const r of rows) {
+        const plateUpper = r.plate.trim().toUpperCase()
         const driverId = bySap[r.sapId] || byPlate[plateUpper]
 
-        if (!driverId || !Number.isFinite(r.amount)) { skipped++; return null }
+        if (!driverId || !Number.isFinite(r.amount)) { skipped++; continue }
 
-        return {
+        const when = r.when || nowIso
+        const sig = transactionSignature({
+          userId: viewingOs,
+          driverId,
+          amount: r.amount,
+          distance: r.distance,
+          paymentMethod: r.paymentMethod,
+          when,
+        })
+
+        // Skip if already exists in DB OR already added in this file
+        if (existingSignatures.has(sig) || seenInThisImport.has(sig)) { duplicates++; continue }
+        seenInThisImport.add(sig)
+
+        txns.push({
           user_id: viewingOs,
           driver_id: driverId,
           amount: r.amount,
@@ -430,23 +477,49 @@ function App() {
           type: 'income',
           note: null,
           source: 'csv_import',
-          transaction_date: r.when || nowIso,
+          transaction_date: when,
+        })
+      }
+
+      if (!txns.length) {
+        const parts = []
+        if (duplicates) parts.push(`${duplicates} duplicate(s)`)
+        if (skipped) parts.push(`${skipped} invalid`)
+        throw new Error(`Nothing to import${parts.length ? ` — ${parts.join(', ')}` : ''}.`)
+      }
+
+      // 5. ✅ NEW: Batched inserts (500 per chunk to stay under Supabase limits)
+      const BATCH_SIZE = 500
+      let inserted = 0
+      for (let i = 0; i < txns.length; i += BATCH_SIZE) {
+        const batch = txns.slice(i, i + BATCH_SIZE)
+        const { error } = await supabase.from('transactions').insert(batch)
+        if (error) {
+          throw new Error(
+            `Insert failed after ${inserted} row(s): ${error.message}`
+          )
         }
-      })
-      .filter(Boolean) // Remove nulls
+        inserted += batch.length
+      }
 
-    if (!txns.length) return fail(`No valid rows to import${skipped ? ` (${skipped} skipped)` : ''}.`)
+      const summary = [
+        `Imported ${inserted} fare row(s)`,
+        newDrivers.length ? `${newDrivers.length} new driver(s)` : null,
+        duplicates ? `${duplicates} duplicate(s) skipped` : null,
+        skipped ? `${skipped} invalid skipped` : null,
+      ].filter(Boolean).join(' · ')
 
-    const { error } = await supabase.from('transactions').insert(txns)
-    if (error) return fail(error.message)
-
-    ok(`Imported ${txns.length} fare row(s)${skipped ? `, skipped ${skipped}` : ''}.`)
-    load()
+      ok(summary)
+      load()
+    } catch (err) {
+      fail(err.message)
+    } finally {
+      setLoading(false)
+    }
   }
 
   /* ---------- Derived data ---------- */
 
-  // --- NEW MEMO FOR FILTERING DRIVERS ---
   const filteredDrivers = useMemo(() => {
     if (!driverSearch.trim()) return drivers
     const q = driverSearch.toLowerCase()
@@ -476,21 +549,17 @@ function App() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return inRange.filter((t) => {
-      // If a specific driver is selected, filter ONLY by that driver ID
       if (selectedDriverId) {
         return String(t.driver_id) === selectedDriverId && (
           !q || [t.drivers?.name, t.note, t.payment_method].some((v) => v && v.toLowerCase().includes(q))
         )
       }
-
-      // Otherwise, apply the normal dropdown filter
       if (driverFilter !== 'all' && String(t.driver_id) !== driverFilter) return false
       if (!q) return true
       return [t.drivers?.name, t.note, t.payment_method].some((v) => v && v.toLowerCase().includes(q))
     })
   }, [inRange, driverFilter, search, selectedDriverId])
 
-  // --- NEW: aggregate stats for the top cards ---
   const stats = useMemo(() => {
     let income = 0
     let distance = 0
@@ -501,12 +570,13 @@ function App() {
     return { income, distance, fares: filtered.length }
   }, [filtered])
 
+  // ✅ FIX: use driver_id (not name) for activeDrivers, and driver_id for plates via join
   const activeStats = useMemo(() => {
     const activePlateSet = new Set()
     const activeDriverIdSet = new Set()
     filtered.forEach((t) => {
-      if (t.drivers?.plate_number) activePlateSet.add(t.drivers.plate_number)
-      if (t.drivers?.name) activeDriverIdSet.add(t.drivers.name) // using name as driver identifier
+      if (t.drivers?.plate_number) activePlateSet.add(t.drivers.plate_number.trim().toUpperCase())
+      if (t.driver_id) activeDriverIdSet.add(String(t.driver_id))
     })
     return {
       activeCars: activePlateSet.size,
@@ -526,22 +596,7 @@ function App() {
     return rows.map((r) => ({ ...r, pct: (r.total / max) * 100 }))
   }, [inRange])
 
-  const daily = useMemo(() => {
-    const days = []
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(); d.setDate(d.getDate() - i)
-      days.push({ key: dayKey(d), label: d.toLocaleDateString('en-US', { weekday: 'short' }), income: 0 })
-    }
-    transactions.forEach((t) => {
-      if (selectedDriverId && String(t.driver_id) !== selectedDriverId) return
-      if (!selectedDriverId && driverFilter !== 'all' && String(t.driver_id) !== driverFilter) return
-      const slot = days.find((d) => d.key === dayKey(t.transaction_date))
-      if (!slot) return
-      slot.income += Number(t.amount)
-    })
-    const max = Math.max(1, ...days.map((d) => d.income))
-    return { days, max }
-  }, [transactions, driverFilter, selectedDriverId])
+  // (Removed the 'daily' useMemo calculation as the chart is gone)
 
   function exportCsv() {
     const header = ['Date', 'Driver (Plate)', 'SAP Profile ID', 'Distance (km)', 'Payment Method', 'Amount']
@@ -731,27 +786,7 @@ function App() {
           </div>
         )}
 
-        <section className="filters">
-          <div className="segmented" role="group">
-            {RANGES.map((r) => (
-              <button key={r.key} className={range === r.key ? 'active' : ''} onClick={() => setRange(r.key)}>{r.label}</button>
-            ))}
-          </div>
-          {range === 'custom' && (
-            <div className="custom-dates">
-              <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} />
-              <span>to</span>
-              <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} />
-            </div>
-          )}
-          {!currentDriver && (
-            <select value={driverFilter} onChange={(e) => setDriverFilter(e.target.value)}>
-              <option value="all">All drivers</option>
-              {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-            </select>
-          )}
-          <input type="search" placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} />
-        </section>
+        {/* ❌ REMOVED: <section className="filters"> block was here */}
 
         <section className="stats" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
           <div className="stat stat-green">
@@ -771,7 +806,6 @@ function App() {
           </div>
         </section>
 
-        {/* --- New Active Stats Row --- */}
         <section className="stats" style={{ gridTemplateColumns: 'repeat(3, 1fr)', marginTop: '-10px' }}>
           <div className="stat">
             <span className="stat-label">Active Cars</span>
@@ -796,15 +830,17 @@ function App() {
               <section className="card">
                 <h2>Import Data</h2>
                 <p className="muted" style={{ marginBottom: 15 }}>
-                  Upload your CSV to automatically read fares, distance, and payment methods.
+                  Upload your CSV to automatically read fares, distance, and payment methods. Duplicate rows (same driver, date, amount & distance) are skipped automatically.
                 </p>
                 <div className="import-row">
                   <label className="import-label" style={{ border: '2px dashed var(--border)', padding: '20px', borderRadius: '8px', display: 'block', textAlign: 'center', cursor: 'pointer' }}>
-                    <span className="import-title" style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>Click to Upload CSV</span>
+                    <span className="import-title" style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>
+                      {loading ? 'Importing…' : 'Click to Upload CSV'}
+                    </span>
                     <span className="import-hint" style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
                       Required: Driver Vehicle Plate, Sap Profile Id, Distance, Total Pay Display
                     </span>
-                    <input type="file" accept=".csv,text/csv" onChange={importCsv} style={{ display: 'none' }} />
+                    <input type="file" accept=".csv,text/csv" onChange={importCsv} disabled={loading} style={{ display: 'none' }} />
                   </label>
                 </div>
               </section>
@@ -815,8 +851,6 @@ function App() {
                 <h2>{currentDriver ? 'Driver Details' : 'Total Drivers Overview'}</h2>
                 {!currentDriver && (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-
-                    {/* --- SEARCH BAR --- */}
                     <input
                       type="search"
                       placeholder="Search name/plate..."
@@ -824,7 +858,6 @@ function App() {
                       onChange={(e) => setDriverSearch(e.target.value)}
                       style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border)', fontSize: '0.85rem', minWidth: '200px' }}
                     />
-
                     <button
                       type="button"
                       className="btn btn-warning"
@@ -911,20 +944,7 @@ function App() {
           </div>
 
           <div className="col">
-            <section className="card">
-              <h2>Last 7 days</h2>
-              <div className="chart">
-                {daily.days.map((d) => (
-                  <div className="chart-day" key={d.key}>
-                    <div className="bars">
-                      <div className="bar green" style={{ height: `${(d.income / daily.max) * 100}%` }} />
-                    </div>
-                    <span>{d.label}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-
+            {/* Chart removed here */}
             <section className="card">
               <h2>Driver leaderboard</h2>
               {leaderboard.length === 0 ? <p className="empty">No fares recorded.</p> : (
@@ -941,17 +961,25 @@ function App() {
           </div>
         </div>
 
+        {/* ✅ UPDATED: Transactions table now shows ALL filtered transactions, not just when a driver is selected */}
         <section className="card">
           <div className="card-head">
             <h2>{currentDriver ? `${currentDriver.name}'s Transactions` : 'Transactions'}</h2>
-            {currentDriver && <span className="muted">{filtered.length} shown</span>}
+            <span className="muted">
+              {filtered.length} shown
+              {!currentDriver && driverFilter !== 'all' && drivers.find(d => String(d.id) === driverFilter) && (
+                <> · filtered to <b>{drivers.find(d => String(d.id) === driverFilter).name}</b></>
+              )}
+            </span>
           </div>
-          {!currentDriver ? (
-            <p className="empty">Select a driver to view their transactions.</p>
-          ) : loading ? (
+
+          {loading ? (
             <p className="empty">Loading…</p>
           ) : filtered.length === 0 ? (
-            <p className="empty">No transactions match.</p>
+            <p className="empty">
+              No transactions match the current filters.
+              {!isViewingAll && ' Try importing a CSV or widening the date range.'}
+            </p>
           ) : (
             <div className="table-wrap">
               <table>
