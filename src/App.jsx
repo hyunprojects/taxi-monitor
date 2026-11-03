@@ -146,6 +146,9 @@ function App() {
   const [customEnd, setCustomEnd] = useState('')
   const [driverFilter, setDriverFilter] = useState('all')
   const [search, setSearch] = useState('')
+  
+  // --- NEW STATE FOR DRIVER LIST SEARCH ---
+  const [driverSearch, setDriverSearch] = useState('')
 
   /* ---------- Auth bootstrap ---------- */
   useEffect(() => {
@@ -387,6 +390,18 @@ function App() {
   }
 
   /* ---------- Derived data ---------- */
+  
+  // --- NEW MEMO FOR FILTERING DRIVERS ---
+  const filteredDrivers = useMemo(() => {
+    if (!driverSearch.trim()) return drivers
+    const q = driverSearch.toLowerCase()
+    return drivers.filter(d => 
+      (d.name && d.name.toLowerCase().includes(q)) || 
+      (d.plate_number && d.plate_number.toLowerCase().includes(q)) ||
+      (d.sap_profile_id && String(d.sap_profile_id).includes(q))
+    )
+  }, [drivers, driverSearch])
+
   const inRange = useMemo(() => {
     let base = transactions
     if (selectedDriverId) base = base.filter((t) => String(t.driver_id) === selectedDriverId)
@@ -735,7 +750,17 @@ function App() {
               <div className="card-head" style={{ flexWrap: 'wrap', gap: 8 }}>
                 <h2>{currentDriver ? 'Driver Details' : 'Total Drivers Overview'}</h2>
                 {!currentDriver && (
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    
+                    {/* --- NEW SEARCH BAR --- */}
+                    <input 
+                      type="search" 
+                      placeholder="Search plate/SAP ID..." 
+                      value={driverSearch} 
+                      onChange={(e) => setDriverSearch(e.target.value)}
+                      style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border)', fontSize: '0.85rem', minWidth: '200px' }}
+                    />
+
                     <button
                       type="button"
                       className="btn btn-warning"
@@ -801,7 +826,8 @@ function App() {
                     {isViewingAll ? 'Showing all drivers under all supervisors.' : 'Click a driver to filter their transactions.'}
                   </p>
                   <ul className="driver-list">
-                    {drivers.map((d) => (
+                    {/* --- CHANGED TO MAP OVER filteredDrivers --- */}
+                    {filteredDrivers.map((d) => (
                       <li key={d.id} onClick={() => setSelectedDriverId(String(d.id))} className="driver-item-hover">
                         <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
                         <div className="grow" style={{ display: 'flex', flexDirection: 'column' }}>
@@ -810,6 +836,10 @@ function App() {
                         </div>
                       </li>
                     ))}
+                    {/* Show a message if the search yields no results */}
+                    {filteredDrivers.length === 0 && (
+                      <p className="muted" style={{ fontSize: '0.9rem', marginTop: '10px' }}>No drivers match your search.</p>
+                    )}
                   </ul>
                 </>
               )}
