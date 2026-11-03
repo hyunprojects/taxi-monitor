@@ -34,18 +34,38 @@ function rangeStart(key) {
    Optional: Payment Method, Total Pay Display, Date
    Amount used for earnings = Total Pay Display (falls back to Distance if absent)
 */
+function splitCsvLine(line) {
+  const out = []
+  let cur = ''
+  let inQ = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (inQ) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++ }
+      else if (ch === '"') inQ = false
+      else cur += ch
+    } else {
+      if (ch === '"') inQ = true
+      else if (ch === ',') { out.push(cur); cur = '' }
+      else cur += ch
+    }
+  }
+  out.push(cur)
+  return out
+}
+
 function parseCsv(text) {
   const clean = text.replace(/^\uFEFF/, '')
   const lines = clean.trim().split(/\r?\n/)
-  const header = lines.shift().split(',').map(h => h.trim())
+  const header = splitCsvLine(lines.shift()).map(h => h.trim())
 
   const need = ['Driver Vehicle Plate', 'Sap Profile Id', 'Distance']
   if (!need.every(n => header.includes(n)))
     throw new Error('CSV missing required columns: ' + need.join(', '))
 
   const idx = {
-    plate:   header.indexOf('Driver Vehicle Plate'),
-    sapId:   header.indexOf('Sap Profile Id'),
+    plate:    header.indexOf('Driver Vehicle Plate'),
+    sapId:    header.indexOf('Sap Profile Id'),
     distance: header.indexOf('Distance'),
     payment:  header.findIndex(h => h.toLowerCase() === 'payment method'),
     totalPay: header.findIndex(h => h.toLowerCase() === 'total pay display'),
@@ -53,8 +73,7 @@ function parseCsv(text) {
   }
 
   return lines.filter(l => l.trim()).map((line, i) => {
-    // simple CSV split (no quoted commas in this file)
-    const c = line.split(',')
+    const c = splitCsvLine(line)
     const plate = (c[idx.plate] || '').trim()
     const sapId = parseInt((c[idx.sapId] || '').trim(), 10)
     const distance = parseFloat((c[idx.distance] || '0').replace(/[^0-9.-]+/g, ''))
@@ -146,7 +165,7 @@ function App() {
   const [customEnd, setCustomEnd] = useState('')
   const [driverFilter, setDriverFilter] = useState('all')
   const [search, setSearch] = useState('')
-  
+
   // --- NEW STATE FOR DRIVER LIST SEARCH ---
   const [driverSearch, setDriverSearch] = useState('')
 
@@ -314,6 +333,12 @@ function App() {
     if (drivers.length === 0) { setPendingClearDrivers(false); return fail('There are no drivers to delete.') }
 
     setLoading(true)
+    // Delete transactions FIRST (in case DB has no ON DELETE CASCADE)
+    const { error: txError } = await supabase.from('transactions').delete().eq('user_id', viewingOs)
+    if (txError) {
+      setLoading(false); setPendingClearDrivers(false)
+      return fail(`Could not delete transactions: ${txError.message}`)
+    }
     const { error: driverError } = await supabase.from('drivers').delete().eq('user_id', viewingOs)
     setLoading(false); setPendingClearDrivers(false)
 
@@ -339,64 +364,94 @@ function App() {
     }
     if (!rows.length) return fail('CSV is empty.')
 
-    // 1. Upsert drivers by sap_profile_id
+    // 1. Fetch existing drivers to map by BOTH SAP ID and Plate Number
     const { data: existing, error: exErr } = await supabase
-      .from('drivers').select('id, sap_profile_id').eq('user_id', viewingOs)
+      .from('drivers').select('id, sap_profile_id, name, plate_number').eq('user_id', viewingOs)
     if (exErr) return fail(exErr.message)
 
-    const bySap = Object.fromEntries((existing || []).map(d => [d.sap_profile_id, d.id]))
+    // Create lookup maps for faster matching
+    const bySap = {}
+    const byPlate = {}
+    ;(existing || []).forEach(d => {
+      if (d.sap_profile_id) bySap[d.sap_profile_id] = d.id
+      if (d.plate_number) byPlate[d.plate_number.trim().toUpperCase()] = d.id
+      // Fallback: Sometimes the name field holds the plate in older auto-generated data
+      if (d.name) byPlate[d.name.trim().toUpperCase()] = d.id
+    })
 
-    const newDrivers = [...new Set(rows.map(r => r.sapId))]
-      .filter(sap => Number.isFinite(sap) && !bySap[sap])
-      .map(sap => {
-        const sample = rows.find(r => r.sapId === sap)
-        return {
-          user_id: viewingOs,
-          sap_profile_id: sap,
-          name: sample.plate,
-          plate_number: sample.plate,
-        }
+    const newDrivers = []
+    const seenSap = new Set()
+    const seenPlate = new Set()
+
+    // 2. Identify which drivers need to be created
+    rows.forEach(r => {
+      const plateUpper = r.plate.trim().toUpperCase()
+      const hasSap = bySap[r.sapId]
+      const hasPlate = byPlate[plateUpper]
+      if (hasSap || hasPlate) return
+      if (seenSap.has(r.sapId) || seenPlate.has(plateUpper)) return
+      seenSap.add(r.sapId)
+      seenPlate.add(plateUpper)
+      newDrivers.push({
+        user_id: viewingOs,
+        sap_profile_id: r.sapId,
+        name: r.plate,          // Fallback name
+        plate_number: r.plate,  // Save the plate number
       })
+    })
 
+    // 3. Insert only the genuinely new drivers
     if (newDrivers.length) {
       const { data: created, error } = await supabase.from('drivers').insert(newDrivers).select()
       if (error) return fail(error.message)
-      created.forEach(d => { bySap[d.sap_profile_id] = d.id })
+      created.forEach(d => {
+        bySap[d.sap_profile_id] = d.id
+        byPlate[d.plate_number.trim().toUpperCase()] = d.id
+      })
     }
 
-    // 2. Build transactions with distance + payment_method
+    // 4. Build transactions using the matched IDs
     const nowIso = new Date().toISOString()
+    let skipped = 0
     const txns = rows
-      .filter(r => bySap[r.sapId] && Number.isFinite(r.amount))
-      .map(r => ({
-        user_id: viewingOs,
-        driver_id: bySap[r.sapId],
-        amount: r.amount,
-        distance: r.distance,
-        payment_method: r.paymentMethod,
-        type: 'income',
-        note: null,
-        source: 'csv_import',
-        transaction_date: r.when || nowIso,
-      }))
+      .map(r => {
+        const plateUpper = r.plate.trim().toUpperCase()
+        // Find driver ID by SAP ID first, then fallback to Plate Number
+        const driverId = bySap[r.sapId] || byPlate[plateUpper]
 
-    if (!txns.length) return fail('No valid rows to import.')
+        if (!driverId || !Number.isFinite(r.amount)) { skipped++; return null }
+
+        return {
+          user_id: viewingOs,
+          driver_id: driverId,
+          amount: r.amount,
+          distance: r.distance,
+          payment_method: r.paymentMethod,
+          type: 'income',
+          note: null,
+          source: 'csv_import',
+          transaction_date: r.when || nowIso,
+        }
+      })
+      .filter(Boolean) // Remove nulls
+
+    if (!txns.length) return fail(`No valid rows to import${skipped ? ` (${skipped} skipped)` : ''}.`)
 
     const { error } = await supabase.from('transactions').insert(txns)
     if (error) return fail(error.message)
 
-    ok(`Imported ${txns.length} fare row(s) across ${new Set(txns.map(t => t.driver_id)).size} driver(s).`)
+    ok(`Imported ${txns.length} fare row(s)${skipped ? `, skipped ${skipped}` : ''}.`)
     load()
   }
 
   /* ---------- Derived data ---------- */
-  
+
   // --- NEW MEMO FOR FILTERING DRIVERS ---
   const filteredDrivers = useMemo(() => {
     if (!driverSearch.trim()) return drivers
     const q = driverSearch.toLowerCase()
-    return drivers.filter(d => 
-      (d.name && d.name.toLowerCase().includes(q)) || 
+    return drivers.filter(d =>
+      (d.name && d.name.toLowerCase().includes(q)) ||
       (d.plate_number && d.plate_number.toLowerCase().includes(q)) ||
       (d.sap_profile_id && String(d.sap_profile_id).includes(q))
     )
@@ -421,20 +476,29 @@ function App() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return inRange.filter((t) => {
-      if (!selectedDriverId && driverFilter !== 'all' && String(t.driver_id) !== driverFilter) return false
+      // If a specific driver is selected, filter ONLY by that driver ID
+      if (selectedDriverId) {
+        return String(t.driver_id) === selectedDriverId && (
+          !q || [t.drivers?.name, t.note, t.payment_method].some((v) => v && v.toLowerCase().includes(q))
+        )
+      }
+
+      // Otherwise, apply the normal dropdown filter
+      if (driverFilter !== 'all' && String(t.driver_id) !== driverFilter) return false
       if (!q) return true
       return [t.drivers?.name, t.note, t.payment_method].some((v) => v && v.toLowerCase().includes(q))
     })
   }, [inRange, driverFilter, search, selectedDriverId])
 
+  // --- NEW: aggregate stats for the top cards ---
   const stats = useMemo(() => {
-    let income = 0, fares = 0, distance = 0
+    let income = 0
+    let distance = 0
     filtered.forEach((t) => {
-      income += Number(t.amount)
-      distance += Number(t.distance || 0)
-      fares += 1
+      income += Number(t.amount) || 0
+      distance += Number(t.distance) || 0
     })
-    return { income, fares, distance }
+    return { income, distance, fares: filtered.length }
   }, [filtered])
 
   const activeStats = useMemo(() => {
@@ -751,12 +815,12 @@ function App() {
                 <h2>{currentDriver ? 'Driver Details' : 'Total Drivers Overview'}</h2>
                 {!currentDriver && (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                    
-                    {/* --- NEW SEARCH BAR --- */}
-                    <input 
-                      type="search" 
-                      placeholder="Search plate/SAP ID..." 
-                      value={driverSearch} 
+
+                    {/* --- SEARCH BAR --- */}
+                    <input
+                      type="search"
+                      placeholder="Search name/plate..."
+                      value={driverSearch}
                       onChange={(e) => setDriverSearch(e.target.value)}
                       style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border)', fontSize: '0.85rem', minWidth: '200px' }}
                     />
@@ -817,8 +881,8 @@ function App() {
 
               {currentDriver ? (
                 <div className="driver-details">
-                  <div><strong>Plate Number</strong><p>{currentDriver.name}</p></div>
-                  <div><strong>SAP Profile ID</strong><p>{currentDriver.sap_profile_id ?? '—'}</p></div>
+                  <div><strong>Plate Number</strong><p>{currentDriver.plate_number || currentDriver.name}</p></div>
+                  <div><strong>Driver Name</strong><p>{currentDriver.name}</p></div>
                 </div>
               ) : (
                 <>
@@ -826,17 +890,17 @@ function App() {
                     {isViewingAll ? 'Showing all drivers under all supervisors.' : 'Click a driver to filter their transactions.'}
                   </p>
                   <ul className="driver-list">
-                    {/* --- CHANGED TO MAP OVER filteredDrivers --- */}
                     {filteredDrivers.map((d) => (
                       <li key={d.id} onClick={() => setSelectedDriverId(String(d.id))} className="driver-item-hover">
                         <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
                         <div className="grow" style={{ display: 'flex', flexDirection: 'column' }}>
                           <span style={{ fontWeight: 600 }}>{d.name}</span>
-                          <span className="muted" style={{ fontSize: '0.8rem' }}>SAP ID: {d.sap_profile_id ?? '—'}</span>
+                          <span className="muted" style={{ fontSize: '0.8rem' }}>
+                            Plate: {d.plate_number || (d.name && d.name.startsWith('NJY') ? d.name : '—')}
+                          </span>
                         </div>
                       </li>
                     ))}
-                    {/* Show a message if the search yields no results */}
                     {filteredDrivers.length === 0 && (
                       <p className="muted" style={{ fontSize: '0.9rem', marginTop: '10px' }}>No drivers match your search.</p>
                     )}
@@ -895,7 +959,7 @@ function App() {
                   <tr>
                     <th>Date</th>
                     <th>Driver (Plate)</th>
-                    <th>SAP ID</th>
+                    <th>Plate Number</th>
                     <th className="num">Distance</th>
                     <th>Payment</th>
                     <th className="num">Amount</th>
@@ -907,7 +971,7 @@ function App() {
                     <tr key={t.id}>
                       <td>{new Date(t.transaction_date).toLocaleString()}</td>
                       <td>{t.drivers?.name || 'Unknown'}</td>
-                      <td>{t.drivers?.sap_profile_id ?? '—'}</td>
+                      <td>{t.drivers?.plate_number || '—'}</td>
                       <td className="num">{Number(t.distance ?? 0).toFixed(2)} km</td>
                       <td style={{ textTransform: 'capitalize' }}>{t.payment_method?.replace(/_/g, ' ') || '—'}</td>
                       <td className="num pos">+{money(t.amount)}</td>
