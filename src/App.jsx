@@ -4,7 +4,6 @@ import logo from './assets/neminstco.png'
 import './App.css'
 
 const CURRENCY = '₱'
-const EXPENSE_CATEGORIES = ['Cash Advance', 'Others']
 const RANGES = [
   { key: 'today', label: 'Today' },
   { key: '7d', label: '7 days' },
@@ -30,7 +29,61 @@ function rangeStart(key) {
   return null
 }
 
-/* ---------- Small inline icons for the login screen ---------- */
+/* ---------- CSV PARSER (orders.csv) ----------
+   Required columns: Driver Vehicle Plate, Sap Profile Id, Distance
+   Optional: Payment Method, Total Pay Display, Date
+   Amount used for earnings = Total Pay Display (falls back to Distance if absent)
+*/
+function parseCsv(text) {
+  const clean = text.replace(/^\uFEFF/, '')
+  const lines = clean.trim().split(/\r?\n/)
+  const header = lines.shift().split(',').map(h => h.trim())
+
+  const need = ['Driver Vehicle Plate', 'Sap Profile Id', 'Distance']
+  if (!need.every(n => header.includes(n)))
+    throw new Error('CSV missing required columns: ' + need.join(', '))
+
+  const idx = {
+    plate:   header.indexOf('Driver Vehicle Plate'),
+    sapId:   header.indexOf('Sap Profile Id'),
+    distance: header.indexOf('Distance'),
+    payment:  header.findIndex(h => h.toLowerCase() === 'payment method'),
+    totalPay: header.findIndex(h => h.toLowerCase() === 'total pay display'),
+    date:     header.findIndex(h => ['date', 'transaction_date', 'datetime'].includes(h.toLowerCase())),
+  }
+
+  return lines.filter(l => l.trim()).map((line, i) => {
+    // simple CSV split (no quoted commas in this file)
+    const c = line.split(',')
+    const plate = (c[idx.plate] || '').trim()
+    const sapId = parseInt((c[idx.sapId] || '').trim(), 10)
+    const distance = parseFloat((c[idx.distance] || '0').replace(/[^0-9.-]+/g, ''))
+
+    let paymentMethod = null
+    if (idx.payment >= 0 && c[idx.payment]) paymentMethod = c[idx.payment].trim() || null
+
+    let amount = distance
+    if (idx.totalPay >= 0 && c[idx.totalPay]) {
+      const parsed = parseFloat(c[idx.totalPay].replace(/[^0-9.-]+/g, ''))
+      if (Number.isFinite(parsed)) amount = parsed
+    }
+
+    let when = null
+    if (idx.date >= 0 && c[idx.date]) {
+      const parsed = new Date(c[idx.date].trim())
+      if (!isNaN(parsed.getTime())) when = parsed.toISOString()
+    }
+
+    if (!plate) throw new Error(`Row ${i + 2}: missing Driver Vehicle Plate`)
+    if (!Number.isFinite(sapId)) throw new Error(`Row ${i + 2}: invalid Sap Profile Id`)
+    if (!Number.isFinite(distance)) throw new Error(`Row ${i + 2}: invalid Distance`)
+    if (!Number.isFinite(amount)) throw new Error(`Row ${i + 2}: invalid Total Pay Display`)
+
+    return { plate, sapId, distance, amount, paymentMethod, when }
+  })
+}
+
+/* ---------- Icons ---------- */
 const EyeIcon = ({ off }) => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" />
@@ -55,34 +108,32 @@ const AppleIcon = () => (
 )
 
 function App() {
-  // --- AUTH & ADMIN STATE ---
   const [session, setSession] = useState(null)
   const [profile, setProfile] = useState(null)
   const [authError, setAuthError] = useState(null)
   const [authInfo, setAuthInfo] = useState(null)
   const [isLogin, setIsLogin] = useState(true)
   const [checkingApproval, setCheckingApproval] = useState(true)
-  const [recovering, setRecovering] = useState(false) // password-reset flow
+  const [recovering, setRecovering] = useState(false)
   const [newPassword, setNewPassword] = useState('')
 
-  // --- ADMIN VIEW STATE ---
   const [allSupervisors, setAllSupervisors] = useState([])
   const [viewingOs, setViewingOs] = useState('all')
-  const [selectedDriverId, setSelectedDriverId] = useState(null) // For Driver Profile View
+  const [selectedDriverId, setSelectedDriverId] = useState(null)
 
-  // --- APP STATE ---
   const [drivers, setDrivers] = useState([])
   const [transactions, setTransactions] = useState([])
   const [loading, setLoading] = useState(false)
   const [notice, setNotice] = useState(null)
 
-  // --- DARK MODE ---
+  const [pendingClearTx, setPendingClearTx] = useState(false)
+  const [pendingClearDrivers, setPendingClearDrivers] = useState(false)
+
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme')
     return saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches
   })
 
-  // --- FORMS ---
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState(() => localStorage.getItem('rememberedEmail') || '')
   const [password, setPassword] = useState('')
@@ -90,30 +141,15 @@ function App() {
   const [showPassword, setShowPassword] = useState(false)
   const [rememberMe, setRememberMe] = useState(() => !!localStorage.getItem('rememberedEmail'))
 
-  const [driverName, setDriverName] = useState('')
-  const [driverPlate, setDriverPlate] = useState('')
-  const [type, setType] = useState('income')
-  const [selectedDriver, setSelectedDriver] = useState('')
-  const [amount, setAmount] = useState('')
-  const [category, setCategory] = useState(EXPENSE_CATEGORIES[0])
-  const [customReason, setCustomReason] = useState('')
-  const [note, setNote] = useState('')
-
-  // --- EDIT MODAL ---
-  const [editingTx, setEditingTx] = useState(null)
-
-  // --- FILTERS ---
   const [range, setRange] = useState('7d')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')
   const [driverFilter, setDriverFilter] = useState('all')
   const [search, setSearch] = useState('')
 
-  // 1. Check Auth Session on Load
+  /* ---------- Auth bootstrap ---------- */
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-    })
+    supabase.auth.getSession().then(({ data: { session } }) => setSession(session))
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'PASSWORD_RECOVERY') setRecovering(true)
       setSession(session)
@@ -121,61 +157,40 @@ function App() {
     return () => subscription.unsubscribe()
   }, [])
 
-  // 2. Dark Mode Toggle
   useEffect(() => {
     document.body.classList.toggle('dark-mode', isDark)
     localStorage.setItem('theme', isDark ? 'dark' : 'light')
   }, [isDark])
 
-  // 3. Check Approval & Load Profile
   useEffect(() => {
     async function checkStatus() {
-      if (!session) {
-        setCheckingApproval(false)
-        return
-      }
+      if (!session) { setCheckingApproval(false); return }
       setCheckingApproval(true)
-
       const { data, error } = await supabase
         .from('profiles')
         .select('approved, full_name, is_admin')
         .eq('id', session.user.id)
         .maybeSingle()
 
-      if (error) {
-        console.error('Supabase error fetching profile:', error)
-        setProfile(null)
-      } else if (data) {
+      if (error) { console.error(error); setProfile(null) }
+      else if (data) {
         setProfile(data)
-
         if (data.is_admin) {
           const { data: osList } = await supabase
-            .from('profiles')
-            .select('id, full_name')
-            .eq('is_admin', false)
+            .from('profiles').select('id, full_name').eq('is_admin', false)
           setAllSupervisors(osList || [])
         }
-
-        if (data.approved) {
-          setViewingOs(data.is_admin ? 'all' : session.user.id)
-        }
-      } else {
-        setProfile(null)
-      }
+        if (data.approved) setViewingOs(data.is_admin ? 'all' : session.user.id)
+      } else setProfile(null)
       setCheckingApproval(false)
     }
     checkStatus()
   }, [session])
 
-  // 4. Load Data when Session or viewingOs changes
   useEffect(() => {
-    if (session && profile?.approved) {
-      load()
-      setSelectedDriverId(null) // Reset driver view when changing OS
-    }
+    if (session && profile?.approved) { load(); setSelectedDriverId(null) }
   }, [session, profile, viewingOs])
 
-  // 5. Notices Auto-dismiss
   useEffect(() => {
     if (!notice) return
     const t = setTimeout(() => setNotice(null), 3500)
@@ -194,26 +209,26 @@ function App() {
   async function fetchDrivers() {
     let query = supabase.from('drivers').select('*').order('name')
     if (viewingOs !== 'all') query = query.eq('user_id', viewingOs)
-
     const { data, error } = await query
     if (error) return fail(`Could not load drivers: ${error.message}`)
     setDrivers(data || [])
   }
 
   async function fetchTransactions() {
-    let query = supabase.from('transactions').select('*, drivers(name)').order('transaction_date', { ascending: false })
+    let query = supabase
+      .from('transactions')
+      .select('*, drivers(name, sap_profile_id, plate_number)')
+      .order('transaction_date', { ascending: false })
     if (viewingOs !== 'all') query = query.eq('user_id', viewingOs)
-
     const { data, error } = await query
     if (error) return fail(`Could not load transactions: ${error.message}`)
     setTransactions(data || [])
   }
 
-  // --- AUTH ACTIONS ---
+  /* ---------- Auth actions ---------- */
   async function handleAuth(e) {
     e.preventDefault()
-    setAuthError(null)
-    setAuthInfo(null)
+    setAuthError(null); setAuthInfo(null)
     if (isLogin) {
       const { error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) return setAuthError(error.message)
@@ -222,8 +237,7 @@ function App() {
     } else {
       if (password !== confirmPassword) return setAuthError('Passwords do not match.')
       const { error } = await supabase.auth.signUp({
-        email,
-        password,
+        email, password,
         options: { data: { full_name: fullName.trim() } },
       })
       if (error) setAuthError(error.message)
@@ -232,9 +246,8 @@ function App() {
   }
 
   async function handleForgotPassword() {
-    setAuthError(null)
-    setAuthInfo(null)
-    if (!email.trim()) return setAuthError('Enter your email above first, then click “Forgot password?”.')
+    setAuthError(null); setAuthInfo(null)
+    if (!email.trim()) return setAuthError('Enter your email above first, then click "Forgot password?".')
     const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
       redirectTo: window.location.origin,
     })
@@ -243,11 +256,9 @@ function App() {
   }
 
   async function handleOAuth(provider) {
-    setAuthError(null)
-    setAuthInfo(null)
+    setAuthError(null); setAuthInfo(null)
     const { error } = await supabase.auth.signInWithOAuth({
-      provider,
-      options: { redirectTo: window.location.origin },
+      provider, options: { redirectTo: window.location.origin },
     })
     if (error) setAuthError(error.message)
   }
@@ -258,89 +269,18 @@ function App() {
     if (newPassword.length < 6) return setAuthError('Password must be at least 6 characters.')
     const { error } = await supabase.auth.updateUser({ password: newPassword })
     if (error) return setAuthError(error.message)
-    setNewPassword('')
-    setRecovering(false)
-    ok('Password updated.')
+    setNewPassword(''); setRecovering(false); ok('Password updated.')
   }
 
-  // --- CRUD ACTIONS ---
-  async function addDriver(e) {
-    e.preventDefault()
-    const name = driverName.trim()
-    if (!name) return
-    if (viewingOs === 'all') return fail('Please select a specific Supervisor first.')
-
-    if (drivers.some((d) => d.name.toLowerCase() === name.toLowerCase() && d.user_id === viewingOs))
-      return fail(`${name} is already on this list.`)
-
-    const { error } = await supabase.from('drivers').insert({
-      name,
-      plate_number: driverPlate.trim() || null,
-      user_id: viewingOs,
-    })
-
-    if (error) return fail(error.message)
-    setDriverName('')
-    setDriverPlate('')
-    ok(`${name} added to fleet.`)
-    fetchDrivers()
-  }
-
+  /* ---------- CRUD ---------- */
   async function deleteDriver(d) {
     if (!window.confirm(`Delete ${d.name}? Their transactions may be removed too.`)) return
     const { error } = await supabase.from('drivers').delete().eq('id', d.id)
     if (error) return fail(`Could not delete ${d.name}: ${error.message}`)
     if (driverFilter === String(d.id)) setDriverFilter('all')
-    if (selectedDriverId === d.id) setSelectedDriverId(null)
+    if (selectedDriverId === String(d.id)) setSelectedDriverId(null)
     ok(`${d.name} deleted.`)
     load()
-  }
-
-  async function addTransaction(e) {
-    e.preventDefault()
-    const value = parseFloat(amount)
-    if (!selectedDriver || !value || value <= 0) return fail('Choose a driver and enter an amount above zero.')
-    if (viewingOs === 'all') return fail('Please select a specific Supervisor first.')
-
-    const finalNote = type === 'expense' && category === 'Others'
-      ? customReason.trim()
-      : note.trim() || null
-
-    const { error } = await supabase.from('transactions').insert({
-      driver_id: selectedDriver,
-      amount: value,
-      type,
-      category: type === 'expense' ? category : null,
-      note: finalNote,
-      user_id: viewingOs,
-    })
-    if (error) return fail(error.message)
-
-    setAmount('')
-    setNote('')
-    setCustomReason('')
-
-    ok(type === 'income' ? `Fare of ${money(value)} recorded.` : `Expense of ${money(value)} recorded.`)
-    fetchTransactions()
-  }
-
-  async function updateTransaction(e) {
-    e.preventDefault()
-    const value = parseFloat(editingTx.amount)
-    if (!editingTx.driver_id || !value || value <= 0) return fail('Choose a driver and enter an amount above zero.')
-
-    const { error } = await supabase.from('transactions').update({
-      driver_id: editingTx.driver_id,
-      amount: value,
-      type: editingTx.type,
-      category: editingTx.type === 'expense' ? editingTx.category : null,
-      note: editingTx.note?.trim() || null,
-    }).eq('id', editingTx.id)
-
-    if (error) return fail(error.message)
-    setEditingTx(null)
-    ok('Transaction updated.')
-    fetchTransactions()
   }
 
   async function deleteTransaction(id) {
@@ -351,13 +291,105 @@ function App() {
     fetchTransactions()
   }
 
-  // --- FILTERS & DATA CALC ---
-  const inRange = useMemo(() => {
-    let base = transactions
-    if (selectedDriverId) {
-      base = base.filter((t) => String(t.driver_id) === selectedDriverId)
+  async function clearAllTransactions() {
+    if (viewingOs === 'all')
+      return fail('Select a specific Supervisor before clearing transactions.')
+    if (transactions.length === 0) { setPendingClearTx(false); return fail('There are no transactions to clear.') }
+
+    setLoading(true)
+    const { error } = await supabase.from('transactions').delete().eq('user_id', viewingOs)
+    setLoading(false); setPendingClearTx(false)
+
+    if (error) return fail(`Could not clear transactions: ${error.message}`)
+    ok(`Cleared ${transactions.length} transaction(s). Drivers kept.`)
+    load()
+  }
+
+  async function deleteAllDrivers() {
+    if (viewingOs === 'all')
+      return fail('Select a specific Supervisor before bulk deleting drivers.')
+    if (drivers.length === 0) { setPendingClearDrivers(false); return fail('There are no drivers to delete.') }
+
+    setLoading(true)
+    const { error: driverError } = await supabase.from('drivers').delete().eq('user_id', viewingOs)
+    setLoading(false); setPendingClearDrivers(false)
+
+    if (driverError) return fail(`Could not delete drivers: ${driverError.message}`)
+    setDriverFilter('all'); setSelectedDriverId(null)
+    ok(`Deleted ${drivers.length} driver(s) and their transactions.`)
+    load()
+  }
+
+  /* ---------- CSV IMPORT (orders.csv) ---------- */
+  async function importCsv(e) {
+    const input = e.target
+    const file = input.files[0]
+    if (!file) return
+    input.value = ''
+    if (viewingOs === 'all') return fail('Select a specific Supervisor before importing.')
+
+    let rows
+    try {
+      rows = parseCsv(await file.text())
+    } catch (err) {
+      return fail(err.message)
+    }
+    if (!rows.length) return fail('CSV is empty.')
+
+    // 1. Upsert drivers by sap_profile_id
+    const { data: existing, error: exErr } = await supabase
+      .from('drivers').select('id, sap_profile_id').eq('user_id', viewingOs)
+    if (exErr) return fail(exErr.message)
+
+    const bySap = Object.fromEntries((existing || []).map(d => [d.sap_profile_id, d.id]))
+
+    const newDrivers = [...new Set(rows.map(r => r.sapId))]
+      .filter(sap => Number.isFinite(sap) && !bySap[sap])
+      .map(sap => {
+        const sample = rows.find(r => r.sapId === sap)
+        return {
+          user_id: viewingOs,
+          sap_profile_id: sap,
+          name: sample.plate,
+          plate_number: sample.plate,
+        }
+      })
+
+    if (newDrivers.length) {
+      const { data: created, error } = await supabase.from('drivers').insert(newDrivers).select()
+      if (error) return fail(error.message)
+      created.forEach(d => { bySap[d.sap_profile_id] = d.id })
     }
 
+    // 2. Build transactions with distance + payment_method
+    const nowIso = new Date().toISOString()
+    const txns = rows
+      .filter(r => bySap[r.sapId] && Number.isFinite(r.amount))
+      .map(r => ({
+        user_id: viewingOs,
+        driver_id: bySap[r.sapId],
+        amount: r.amount,
+        distance: r.distance,
+        payment_method: r.paymentMethod,
+        type: 'income',
+        note: null,
+        source: 'csv_import',
+        transaction_date: r.when || nowIso,
+      }))
+
+    if (!txns.length) return fail('No valid rows to import.')
+
+    const { error } = await supabase.from('transactions').insert(txns)
+    if (error) return fail(error.message)
+
+    ok(`Imported ${txns.length} fare row(s) across ${new Set(txns.map(t => t.driver_id)).size} driver(s).`)
+    load()
+  }
+
+  /* ---------- Derived data ---------- */
+  const inRange = useMemo(() => {
+    let base = transactions
+    if (selectedDriverId) base = base.filter((t) => String(t.driver_id) === selectedDriverId)
     if (range === 'custom') {
       if (!customStart && !customEnd) return base
       return base.filter((t) => {
@@ -376,24 +408,37 @@ function App() {
     return inRange.filter((t) => {
       if (!selectedDriverId && driverFilter !== 'all' && String(t.driver_id) !== driverFilter) return false
       if (!q) return true
-      return [t.drivers?.name, t.category, t.note].some((v) => v && v.toLowerCase().includes(q))
+      return [t.drivers?.name, t.note, t.payment_method].some((v) => v && v.toLowerCase().includes(q))
     })
   }, [inRange, driverFilter, search, selectedDriverId])
 
   const stats = useMemo(() => {
-    let income = 0, expense = 0, fares = 0
+    let income = 0, fares = 0, distance = 0
     filtered.forEach((t) => {
-      const v = Number(t.amount)
-      if (t.type === 'expense') expense += v
-      else { income += v; fares += 1 }
+      income += Number(t.amount)
+      distance += Number(t.distance || 0)
+      fares += 1
     })
-    return { income, expense, net: income - expense, fares, avg: fares ? income / fares : 0 }
+    return { income, fares, distance }
+  }, [filtered])
+
+  const activeStats = useMemo(() => {
+    const activePlateSet = new Set()
+    const activeDriverIdSet = new Set()
+    filtered.forEach((t) => {
+      if (t.drivers?.plate_number) activePlateSet.add(t.drivers.plate_number)
+      if (t.drivers?.name) activeDriverIdSet.add(t.drivers.name) // using name as driver identifier
+    })
+    return {
+      activeCars: activePlateSet.size,
+      activeDrivers: activeDriverIdSet.size,
+      trips: filtered.length,
+    }
   }, [filtered])
 
   const leaderboard = useMemo(() => {
     const map = {}
     inRange.forEach((t) => {
-      if (t.type === 'expense') return
       const name = t.drivers?.name || 'Unknown'
       map[name] = (map[name] || 0) + Number(t.amount)
     })
@@ -405,43 +450,38 @@ function App() {
   const daily = useMemo(() => {
     const days = []
     for (let i = 6; i >= 0; i--) {
-      const d = new Date()
-      d.setDate(d.getDate() - i)
-      days.push({ key: dayKey(d), label: d.toLocaleDateString('en-US', { weekday: 'short' }), income: 0, expense: 0 })
+      const d = new Date(); d.setDate(d.getDate() - i)
+      days.push({ key: dayKey(d), label: d.toLocaleDateString('en-US', { weekday: 'short' }), income: 0 })
     }
     transactions.forEach((t) => {
       if (selectedDriverId && String(t.driver_id) !== selectedDriverId) return
       if (!selectedDriverId && driverFilter !== 'all' && String(t.driver_id) !== driverFilter) return
-
       const slot = days.find((d) => d.key === dayKey(t.transaction_date))
       if (!slot) return
-      if (t.type === 'expense') slot.expense += Number(t.amount)
-      else slot.income += Number(t.amount)
+      slot.income += Number(t.amount)
     })
-    const max = Math.max(1, ...days.map((d) => Math.max(d.income, d.expense)))
+    const max = Math.max(1, ...days.map((d) => d.income))
     return { days, max }
   }, [transactions, driverFilter, selectedDriverId])
 
   function exportCsv() {
-    const header = ['Date', 'Driver', 'Type', 'Category', 'Note', 'Amount']
+    const header = ['Date', 'Driver (Plate)', 'SAP Profile ID', 'Distance (km)', 'Payment Method', 'Amount']
     const rows = filtered.map((t) => [
       new Date(t.transaction_date).toLocaleString(),
       t.drivers?.name || '',
-      t.type === 'expense' ? 'Expense' : 'Fare',
-      t.category || '',
-      t.note || '',
+      t.drivers?.sap_profile_id ?? '',
+      Number(t.distance ?? 0).toFixed(2),
+      t.payment_method || '',
       Number(t.amount).toFixed(2),
     ])
     const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n')
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
     const a = document.createElement('a')
-    a.href = url
-    a.download = `taxi-report-${dayKey(new Date())}.csv`
-    a.click()
+    a.href = url; a.download = `taxi-report-${dayKey(new Date())}.csv`; a.click()
     URL.revokeObjectURL(url)
   }
 
-  // --- RENDER: SET NEW PASSWORD (after reset-email link) ---
+  /* ---------- Render: password reset ---------- */
   if (session && recovering) {
     return (
       <div className="auth-container auth-solo">
@@ -462,7 +502,7 @@ function App() {
     )
   }
 
-  // --- RENDER: CHECKING ---
+  /* ---------- Render: checking ---------- */
   if (session && checkingApproval) {
     return (
       <div className="auth-container auth-solo">
@@ -474,7 +514,7 @@ function App() {
     )
   }
 
-  // --- RENDER: PENDING APPROVAL ---
+  /* ---------- Render: pending ---------- */
   if (session && profile && !profile.approved) {
     return (
       <div className="auth-container auth-solo">
@@ -484,43 +524,29 @@ function App() {
           <p className="auth-sub" style={{ marginBottom: 28 }}>
             Your account has been created successfully, but an administrator needs to approve it before you can access the dashboard.
           </p>
-          <button type="button" className="auth-submit" onClick={() => supabase.auth.signOut()}>
-            Log Out
-          </button>
+          <button type="button" className="auth-submit" onClick={() => supabase.auth.signOut()}>Log Out</button>
         </div>
       </div>
     )
   }
 
-  // --- RENDER: LOGIN / SIGN UP ---
+  /* ---------- Render: login ---------- */
   if (!session) {
     return (
       <div className="auth-container">
-        {/* Left: brand panel */}
         <aside className="auth-brand">
           <img src={logo} alt="NEMINTSCO, powered by Green GSM" className="auth-logo" />
           <div className="auth-tagline">
             <h2>Every Fare,<br /><span>Clearly Tracked.</span></h2>
-            <p>
-              A simple, reliable fleet monitor for revenue, expenses and driver
-              performance, built for NEMINTSCO.
-            </p>
+            <p>A simple, reliable fleet monitor for revenue, expenses and driver performance, built for NEMINTSCO.</p>
           </div>
         </aside>
-
-        {/* Right: form */}
         <div className="auth-panel">
           <div className="auth-card">
             <h1>{isLogin ? 'Welcome Back!' : 'Create Account'}</h1>
-            <p className="auth-sub">
-              {isLogin
-                ? 'Welcome back! Please enter your details!'
-                : 'Sign up to start tracking fares and expenses.'}
-            </p>
-
+            <p className="auth-sub">{isLogin ? 'Welcome back! Please enter your details!' : 'Sign up to start tracking fares and expenses.'}</p>
             {authError && <div className="notice notice-error">{authError}</div>}
             {authInfo && <div className="notice notice-ok">{authInfo}</div>}
-
             <form onSubmit={handleAuth} className="auth-form">
               {!isLogin && (
                 <div className="field">
@@ -528,12 +554,10 @@ function App() {
                   <input id="full-name" type="text" placeholder="Full name (e.g. Sir Aldrin)" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
                 </div>
               )}
-
               <div className="field">
                 <label htmlFor="email">Email</label>
                 <input id="email" type="email" placeholder="Enter your email" value={email} onChange={(e) => setEmail(e.target.value)} required />
               </div>
-
               <div className="field">
                 <label htmlFor="password">Password</label>
                 <div className="pw-wrap">
@@ -543,14 +567,12 @@ function App() {
                   </button>
                 </div>
               </div>
-
               {!isLogin && (
                 <div className="field">
                   <label htmlFor="confirm">Re-enter password</label>
                   <input id="confirm" type={showPassword ? 'text' : 'password'} placeholder="Re-enter password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required />
                 </div>
               )}
-
               {isLogin && (
                 <div className="auth-row">
                   <label className="remember">
@@ -560,17 +582,13 @@ function App() {
                   <button type="button" className="auth-link" onClick={handleForgotPassword}>Forgot password?</button>
                 </div>
               )}
-
               <button type="submit" className="auth-submit">{isLogin ? 'Log In' : 'Sign Up'}</button>
             </form>
-
             <div className="auth-divider"><span>Or continue with</span></div>
-
             <div className="auth-social">
               <button type="button" onClick={() => handleOAuth('google')}><GoogleIcon /> Google</button>
               <button type="button" onClick={() => handleOAuth('apple')}><AppleIcon /> Apple</button>
             </div>
-
             <p className="auth-switch">
               {isLogin ? "Don't have an account?" : 'Already have an account?'}{' '}
               <button type="button" onClick={() => { setIsLogin(!isLogin); setAuthError(null); setAuthInfo(null) }}>
@@ -583,16 +601,15 @@ function App() {
     )
   }
 
-  // --- RENDER: DASHBOARD ---
+  /* ---------- Render: dashboard ---------- */
   const isViewingAll = viewingOs === 'all'
   const currentDriver = selectedDriverId ? drivers.find((d) => String(d.id) === selectedDriverId) : null
 
   let viewTitle = 'All Operations'
-  if (currentDriver) {
-    viewTitle = `Driver: ${currentDriver.name}`
-  } else if (!isViewingAll) {
-    viewTitle = (viewingOs === session.user.id ? profile?.full_name : allSupervisors.find((s) => s.id === viewingOs)?.full_name)
-  }
+  if (currentDriver) viewTitle = `Driver: ${currentDriver.name}`
+  else if (!isViewingAll) viewTitle = (viewingOs === session.user.id ? profile?.full_name : allSupervisors.find((s) => s.id === viewingOs)?.full_name)
+
+  const canBulkDelete = !isViewingAll
 
   return (
     <div className="app">
@@ -604,9 +621,7 @@ function App() {
               <h1>
                 Dashboard: <span>{viewTitle}</span>
                 {currentDriver && (
-                  <button className="back-btn" onClick={() => setSelectedDriverId(null)}>
-                    ← Back
-                  </button>
+                  <button className="back-btn" onClick={() => setSelectedDriverId(null)}>← Back</button>
                 )}
               </h1>
               <p>{profile?.is_admin ? 'Admin Access' : 'Supervisor Access'} • {session.user.email}</p>
@@ -633,16 +648,14 @@ function App() {
 
         {isViewingAll && (
           <div className="admin-warning">
-            ⚠️ You are viewing the combined data of all Supervisors. To add drivers or record transactions, please select a specific Supervisor from the top right dropdown.
+            ⚠️ You are viewing the combined data of all Supervisors. To import CSV data, please select a specific Supervisor from the top right dropdown.
           </div>
         )}
 
         <section className="filters">
           <div className="segmented" role="group">
             {RANGES.map((r) => (
-              <button key={r.key} className={range === r.key ? 'active' : ''} onClick={() => setRange(r.key)}>
-                {r.label}
-              </button>
+              <button key={r.key} className={range === r.key ? 'active' : ''} onClick={() => setRange(r.key)}>{r.label}</button>
             ))}
           </div>
           {range === 'custom' && (
@@ -652,149 +665,155 @@ function App() {
               <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} />
             </div>
           )}
-
           {!currentDriver && (
             <select value={driverFilter} onChange={(e) => setDriverFilter(e.target.value)}>
-              <option value="all">All my drivers</option>
+              <option value="all">All drivers</option>
               {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
           )}
-
           <input type="search" placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} />
         </section>
 
-        <section className="stats">
+        <section className="stats" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
           <div className="stat stat-green">
-            <span className="stat-label">Revenue</span>
+            <span className="stat-label">Total Earnings</span>
             <strong>{money(stats.income)}</strong>
-            <small>{stats.fares} fare{stats.fares === 1 ? '' : 's'}</small>
+            <small>{stats.fares} fare{stats.fares === 1 ? '' : 's'} recorded</small>
           </div>
-          <div className="stat stat-red">
-            <span className="stat-label">Expenses</span>
-            <strong>{money(stats.expense)}</strong>
-            <small>Cash advances, others</small>
+          <div className="stat">
+            <span className="stat-label">Total Distance</span>
+            <strong>{stats.distance.toFixed(2)} km</strong>
+            <small>Sum of trip distances</small>
           </div>
-          <div className={`stat ${stats.net >= 0 ? 'stat-blue' : 'stat-red'}`}>
-            <span className="stat-label">Net income</span>
-            <strong>{money(stats.net)}</strong>
-            <small>Revenue minus expenses</small>
+          <div className="stat">
+            <span className="stat-label">Avg Fare</span>
+            <strong>{money(stats.fares ? stats.income / stats.fares : 0)}</strong>
+            <small>Per transaction</small>
           </div>
-          <div className="stat stat-blue-soft">
-            <span className="stat-label">Average fare</span>
-            <strong>{money(stats.avg)}</strong>
-            <small>Per recorded fare</small>
+        </section>
+
+        {/* --- New Active Stats Row --- */}
+        <section className="stats" style={{ gridTemplateColumns: 'repeat(3, 1fr)', marginTop: '-10px' }}>
+          <div className="stat">
+            <span className="stat-label">Active Cars</span>
+            <strong>{activeStats.activeCars}</strong>
+            <small>Plate numbers with transactions</small>
+          </div>
+          <div className="stat">
+            <span className="stat-label">Active Drivers</span>
+            <strong>{activeStats.activeDrivers}</strong>
+            <small>Drivers with transactions</small>
+          </div>
+          <div className="stat">
+            <span className="stat-label">Trips</span>
+            <strong>{activeStats.trips}</strong>
+            <small>Total transactions</small>
           </div>
         </section>
 
         <div className="grid">
           <div className="col">
             {!isViewingAll && !currentDriver && (
-              <>
-                <section className="card">
-                  <h2>Record transaction</h2>
-                  <div className="toggle" role="group">
-                    <button type="button" className={type === 'income' ? 'on-green' : ''} onClick={() => setType('income')}>Fare</button>
-                    <button type="button" className={type === 'expense' ? 'on-red' : ''} onClick={() => setType('expense')}>Expense</button>
-                  </div>
-                  <form onSubmit={addTransaction} className="form">
-                    <label>Driver
-                      <select value={selectedDriver} onChange={(e) => setSelectedDriver(e.target.value)}>
-                        <option value="">Select driver</option>
-                        {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} {d.plate_number ? `(${d.plate_number})` : ''}</option>)}
-                      </select>
-                    </label>
-                    <label>Amount ({CURRENCY})
-                      <input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
-                    </label>
-
-                    {type === 'expense' && (
-                      <>
-                        <label>Category
-                          <select value={category} onChange={(e) => setCategory(e.target.value)}>
-                            {EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-                          </select>
-                        </label>
-
-                        {category === 'Others' && (
-                          <label>Specify Reason
-                            <input value={customReason} onChange={(e) => setCustomReason(e.target.value)} placeholder="e.g. Car wash, parking ticket..." required />
-                          </label>
-                        )}
-                      </>
-                    )}
-
-                    {(type === 'income' || category === 'Cash Advance') && (
-                      <label>Note (optional)
-                        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={type === 'income' ? 'Passenger, route, plate no.' : 'Additional details...'} />
-                      </label>
-                    )}
-
-                    <button type="submit" className={`btn ${type === 'income' ? 'btn-green' : 'btn-red'}`}>
-                      {type === 'income' ? 'Record fare' : 'Record expense'}
-                    </button>
-                  </form>
-                </section>
-
-                <section className="card">
-                  <h2>My Drivers</h2>
-                  <form onSubmit={addDriver} className="inline-form">
-                    <input value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver name" />
-                    <input value={driverPlate} onChange={(e) => setDriverPlate(e.target.value)} placeholder="Plate No. (Optional)" style={{ maxWidth: '150px' }} />
-                    <button type="submit" className="btn btn-blue">Add driver</button>
-                  </form>
-                  {drivers.length === 0 ? (
-                    <p className="empty">No drivers yet.</p>
-                  ) : (
-                    <ul className="driver-list">
-                      {drivers.map((d) => (
-                        <li key={d.id} onClick={() => setSelectedDriverId(String(d.id))} className="driver-item-hover">
-                          <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
-                          <div className="grow" style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ fontWeight: 600 }}>{d.name}</span>
-                            {d.plate_number && <span style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>Plate: {d.plate_number}</span>}
-                          </div>
-                          <button className="link-red" onClick={(e) => { e.stopPropagation(); deleteDriver(d) }}>Delete</button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </section>
-              </>
-            )}
-
-            {(isViewingAll || currentDriver) && (
               <section className="card">
-                <h2>{currentDriver ? 'Driver Details' : 'Total Drivers Overview'}</h2>
-
-                {currentDriver ? (
-                  <div className="driver-details">
-                    <div>
-                      <strong>Name</strong>
-                      <p>{currentDriver.name}</p>
-                    </div>
-                    <div>
-                      <strong>Plate Number</strong>
-                      <p>{currentDriver.plate_number || 'Not specified'}</p>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <p className="muted">Showing all drivers under all supervisors. Click to filter.</p>
-                    <ul className="driver-list">
-                      {drivers.map((d) => (
-                        <li key={d.id} onClick={() => setSelectedDriverId(String(d.id))} className="driver-item-hover">
-                          <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
-                          <div className="grow" style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ fontWeight: 600 }}>{d.name}</span>
-                            {d.plate_number && <span style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>Plate: {d.plate_number}</span>}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
+                <h2>Import Data</h2>
+                <p className="muted" style={{ marginBottom: 15 }}>
+                  Upload your CSV to automatically read fares, distance, and payment methods.
+                </p>
+                <div className="import-row">
+                  <label className="import-label" style={{ border: '2px dashed var(--border)', padding: '20px', borderRadius: '8px', display: 'block', textAlign: 'center', cursor: 'pointer' }}>
+                    <span className="import-title" style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>Click to Upload CSV</span>
+                    <span className="import-hint" style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
+                      Required: Driver Vehicle Plate, Sap Profile Id, Distance, Total Pay Display
+                    </span>
+                    <input type="file" accept=".csv,text/csv" onChange={importCsv} style={{ display: 'none' }} />
+                  </label>
+                </div>
               </section>
             )}
+
+            <section className="card">
+              <div className="card-head" style={{ flexWrap: 'wrap', gap: 8 }}>
+                <h2>{currentDriver ? 'Driver Details' : 'Total Drivers Overview'}</h2>
+                {!currentDriver && (
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="btn btn-warning"
+                      onClick={() => setPendingClearTx(true)}
+                      disabled={loading || !canBulkDelete || transactions.length === 0}
+                      title={canBulkDelete ? 'Remove all transactions but keep drivers' : 'Select a specific supervisor first'}
+                      style={{ background: '#f59e0b', color: '#1a1a1a', border: 'none', padding: '6px 12px', borderRadius: 6, fontWeight: 500, fontSize: '0.85rem', cursor: canBulkDelete && !loading ? 'pointer' : 'not-allowed', opacity: canBulkDelete && !loading ? 1 : 0.5 }}
+                    >
+                      🧹 Clear Transactions ({transactions.length})
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => setPendingClearDrivers(true)}
+                      disabled={loading || !canBulkDelete || drivers.length === 0}
+                      title={canBulkDelete ? 'Delete all drivers and their transactions' : 'Select a specific supervisor first'}
+                      style={{ background: '#dc2626', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontWeight: 500, fontSize: '0.85rem', cursor: canBulkDelete && !loading ? 'pointer' : 'not-allowed', opacity: canBulkDelete && !loading ? 1 : 0.5 }}
+                    >
+                      🗑️ Delete All Drivers ({drivers.length})
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {pendingClearTx && (
+                <div style={{ marginBottom: 12, padding: 12, background: 'rgba(245,158,11,0.12)', border: '1px solid #f59e0b', borderRadius: 8 }}>
+                  <p style={{ margin: '0 0 10px', fontWeight: 500 }}>
+                    Delete all <b>{transactions.length}</b> transactions for this supervisor? Drivers will be kept.
+                  </p>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn" onClick={clearAllTransactions} disabled={loading}
+                      style={{ background: '#f59e0b', color: '#1a1a1a', border: 'none', padding: '6px 12px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}>
+                      Yes, clear transactions
+                    </button>
+                    <button className="btn btn-ghost" onClick={() => setPendingClearTx(false)} disabled={loading}>Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              {pendingClearDrivers && (
+                <div style={{ marginBottom: 12, padding: 12, background: 'rgba(220,38,38,0.12)', border: '1px solid #dc2626', borderRadius: 8 }}>
+                  <p style={{ margin: '0 0 10px', fontWeight: 500 }}>
+                    Delete all <b>{drivers.length}</b> drivers AND their transactions? This cannot be undone.
+                  </p>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn" onClick={deleteAllDrivers} disabled={loading}
+                      style={{ background: '#dc2626', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}>
+                      Yes, delete everything
+                    </button>
+                    <button className="btn btn-ghost" onClick={() => setPendingClearDrivers(false)} disabled={loading}>Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              {currentDriver ? (
+                <div className="driver-details">
+                  <div><strong>Plate Number</strong><p>{currentDriver.name}</p></div>
+                  <div><strong>SAP Profile ID</strong><p>{currentDriver.sap_profile_id ?? '—'}</p></div>
+                </div>
+              ) : (
+                <>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    {isViewingAll ? 'Showing all drivers under all supervisors.' : 'Click a driver to filter their transactions.'}
+                  </p>
+                  <ul className="driver-list">
+                    {drivers.map((d) => (
+                      <li key={d.id} onClick={() => setSelectedDriverId(String(d.id))} className="driver-item-hover">
+                        <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
+                        <div className="grow" style={{ display: 'flex', flexDirection: 'column' }}>
+                          <span style={{ fontWeight: 600 }}>{d.name}</span>
+                          <span className="muted" style={{ fontSize: '0.8rem' }}>SAP ID: {d.sap_profile_id ?? '—'}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </section>
           </div>
 
           <div className="col">
@@ -805,7 +824,6 @@ function App() {
                   <div className="chart-day" key={d.key}>
                     <div className="bars">
                       <div className="bar green" style={{ height: `${(d.income / daily.max) * 100}%` }} />
-                      <div className="bar red" style={{ height: `${(d.expense / daily.max) * 100}%` }} />
                     </div>
                     <span>{d.label}</span>
                   </div>
@@ -813,22 +831,19 @@ function App() {
               </div>
             </section>
 
-            {/* ADMIN ONLY: Driver Leaderboard */}
-            {profile?.is_admin && (
-              <section className="card">
-                <h2>Driver leaderboard</h2>
-                {leaderboard.length === 0 ? <p className="empty">No fares recorded.</p> : (
-                  <ol className="leaderboard">
-                    {leaderboard.map((r, i) => (
-                      <li key={r.name}>
-                        <div className="lb-row"><span>{i + 1}. {r.name}</span><strong>{money(r.total)}</strong></div>
-                        <div className="track"><div className="fill" style={{ width: `${r.pct}%` }} /></div>
-                      </li>
-                    ))}
-                  </ol>
-                )}
-              </section>
-            )}
+            <section className="card">
+              <h2>Driver leaderboard</h2>
+              {leaderboard.length === 0 ? <p className="empty">No fares recorded.</p> : (
+                <ol className="leaderboard">
+                  {leaderboard.map((r, i) => (
+                    <li key={r.name}>
+                      <div className="lb-row"><span>{i + 1}. {r.name}</span><strong>{money(r.total)}</strong></div>
+                      <div className="track"><div className="fill" style={{ width: `${r.pct}%` }} /></div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </section>
           </div>
         </div>
 
@@ -847,68 +862,36 @@ function App() {
             <div className="table-wrap">
               <table>
                 <thead>
-                  <tr><th>Date</th><th>Driver</th><th>Details</th><th className="num">Amount</th><th className="num">Actions</th></tr>
+                  <tr>
+                    <th>Date</th>
+                    <th>Driver (Plate)</th>
+                    <th>SAP ID</th>
+                    <th className="num">Distance</th>
+                    <th>Payment</th>
+                    <th className="num">Amount</th>
+                    <th className="num">Actions</th>
+                  </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((t) => {
-                    const isExpense = t.type === 'expense'
-                    return (
-                      <tr key={t.id}>
-                        <td>{new Date(t.transaction_date).toLocaleString()}</td>
-                        <td>{t.drivers?.name || 'Unknown'}</td>
-                        <td>
-                          <span className={`tag ${isExpense ? 'tag-red' : 'tag-green'}`}>{isExpense ? t.category || 'Expense' : 'Fare'}</span>{' '}
-                          {t.note && <span className="muted">{t.note}</span>}
-                        </td>
-                        <td className={`num ${isExpense ? 'neg' : 'pos'}`}>{isExpense ? '−' : '+'}{money(t.amount)}</td>
-                        <td className="num">
-                          <button className="link-blue" onClick={() => setEditingTx(t)}>Edit</button>
-                          <button className="link-red" onClick={() => deleteTransaction(t.id)}>Delete</button>
-                        </td>
-                      </tr>
-                    )
-                  })}
+                  {filtered.map((t) => (
+                    <tr key={t.id}>
+                      <td>{new Date(t.transaction_date).toLocaleString()}</td>
+                      <td>{t.drivers?.name || 'Unknown'}</td>
+                      <td>{t.drivers?.sap_profile_id ?? '—'}</td>
+                      <td className="num">{Number(t.distance ?? 0).toFixed(2)} km</td>
+                      <td style={{ textTransform: 'capitalize' }}>{t.payment_method?.replace(/_/g, ' ') || '—'}</td>
+                      <td className="num pos">+{money(t.amount)}</td>
+                      <td className="num">
+                        <button className="link-red" onClick={() => deleteTransaction(t.id)}>Delete</button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
           )}
         </section>
       </main>
-
-      {editingTx && (
-        <div className="modal-backdrop">
-          <div className="modal">
-            <h2>Edit Transaction</h2>
-            <form onSubmit={updateTransaction} className="form">
-              <label>Driver
-                <select value={editingTx.driver_id} onChange={(e) => setEditingTx({ ...editingTx, driver_id: e.target.value })}>
-                  {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                </select>
-              </label>
-              <label>Amount ({CURRENCY})
-                <input type="number" step="0.01" min="0" value={editingTx.amount} onChange={(e) => setEditingTx({ ...editingTx, amount: e.target.value })} />
-              </label>
-
-              {editingTx.type === 'expense' && (
-                <label>Category
-                  <select value={editingTx.category || ''} onChange={(e) => setEditingTx({ ...editingTx, category: e.target.value })}>
-                    {EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-                  </select>
-                </label>
-              )}
-
-              <label>Note / Reason
-                <input value={editingTx.note || ''} onChange={(e) => setEditingTx({ ...editingTx, note: e.target.value })} />
-              </label>
-
-              <div className="modal-actions">
-                <button type="button" className="btn btn-ghost" onClick={() => setEditingTx(null)}>Cancel</button>
-                <button type="submit" className="btn btn-blue">Save Changes</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

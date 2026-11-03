@@ -690,3 +690,7 @@ tbody tr:hover { background: var(--bg); }
   .modal { padding: 18px; }
   .auth-social { grid-template-columns: 1fr; }
 }
+.btn-warning { background: #f59e0b; color: #1a1a1a; }
+.btn-danger  { background: #dc2626; color: #fff; }
+.btn-warning:disabled, .btn-danger:disabled { opacity: .5; cursor: not-allowed; }
+.card-head { display: flex; justify-content: space-between; align-items: center; }
