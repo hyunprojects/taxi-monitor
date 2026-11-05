@@ -98,18 +98,6 @@ function parseCsv(text) {
   })
 }
 
-/* ---------- ✅ NEW: build a stable signature to detect duplicate imports ---------- */
-function transactionSignature({ driverId, amount, distance, paymentMethod, when, userId }) {
-  return [
-    userId,
-    driverId,
-    when || 'null',
-    Number(amount).toFixed(2),
-    Number(distance ?? 0).toFixed(2),
-    paymentMethod || 'null',
-  ].join('|')
-}
-
 /* ---------- Icons ---------- */
 const EyeIcon = ({ off }) => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -168,7 +156,6 @@ function App() {
   const [showPassword, setShowPassword] = useState(false)
   const [rememberMe, setRememberMe] = useState(() => !!localStorage.getItem('rememberedEmail'))
 
-  // Changed default from '7d' to 'all' since the filter UI is removed
   const [range, setRange] = useState('all')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')
@@ -354,7 +341,7 @@ function App() {
     load()
   }
 
-  /* ---------- ✅ UPDATED: CSV IMPORT with duplicate protection + batched inserts ---------- */
+  /* ---------- CSV IMPORT: every valid row is inserted, no dedup ---------- */
   async function importCsv(e) {
     const input = e.target
     const file = input.files[0]
@@ -372,7 +359,7 @@ function App() {
 
     setLoading(true)
     try {
-      // 1. Fetch existing drivers
+      // 1. Fetch existing drivers so we can resolve driver_id for each row
       const { data: existing, error: exErr } = await supabase
         .from('drivers').select('id, sap_profile_id, name, plate_number').eq('user_id', viewingOs)
       if (exErr) throw new Error(exErr.message)
@@ -385,15 +372,16 @@ function App() {
         if (d.name) byPlate[d.name.trim().toUpperCase()] = d.id
       })
 
+      // 2. Create drivers that don't exist yet.
+      //    We still dedupe drivers WITHIN this file, otherwise inserting the
+      //    same sap_profile_id twice would violate a unique constraint on drivers.
       const newDrivers = []
       const seenSap = new Set()
       const seenPlate = new Set()
 
       rows.forEach(r => {
         const plateUpper = r.plate.trim().toUpperCase()
-        const hasSap = bySap[r.sapId]
-        const hasPlate = byPlate[plateUpper]
-        if (hasSap || hasPlate) return
+        if (bySap[r.sapId] || byPlate[plateUpper]) return
         if (seenSap.has(r.sapId) || seenPlate.has(plateUpper)) return
         seenSap.add(r.sapId)
         seenPlate.add(plateUpper)
@@ -405,7 +393,6 @@ function App() {
         })
       })
 
-      // 2. Insert new drivers
       if (newDrivers.length) {
         const { data: created, error } = await supabase.from('drivers').insert(newDrivers).select()
         if (error) throw new Error(error.message)
@@ -415,58 +402,16 @@ function App() {
         })
       }
 
-      // 3. ✅ NEW: Pre-fetch existing transactions in the date window to detect duplicates
-      const nowIso = new Date().toISOString()
-      const rowDates = rows.map(r => r.when || nowIso).sort()
-      const minDate = rowDates[0]
-      const maxDate = rowDates[rowDates.length - 1]
-
-      const { data: existingTx, error: txFetchErr } = await supabase
-        .from('transactions')
-        .select('driver_id, amount, distance, payment_method, transaction_date')
-        .eq('user_id', viewingOs)
-        .gte('transaction_date', minDate)
-        .lte('transaction_date', maxDate)
-      if (txFetchErr) throw new Error(txFetchErr.message)
-
-      const existingSignatures = new Set(
-        (existingTx || []).map(t =>
-          transactionSignature({
-            userId: viewingOs,
-            driverId: t.driver_id,
-            amount: t.amount,
-            distance: t.distance,
-            paymentMethod: t.payment_method,
-            when: t.transaction_date,
-          })
-        )
-      )
-
-      // 4. Build transactions, skipping duplicates
+      // 3. Build transactions — NO duplicate detection at all.
       let skipped = 0
-      let duplicates = 0
-      const seenInThisImport = new Set()
       const txns = []
+      const nowIso = new Date().toISOString()
 
       for (const r of rows) {
         const plateUpper = r.plate.trim().toUpperCase()
         const driverId = bySap[r.sapId] || byPlate[plateUpper]
 
         if (!driverId || !Number.isFinite(r.amount)) { skipped++; continue }
-
-        const when = r.when || nowIso
-        const sig = transactionSignature({
-          userId: viewingOs,
-          driverId,
-          amount: r.amount,
-          distance: r.distance,
-          paymentMethod: r.paymentMethod,
-          when,
-        })
-
-        // Skip if already exists in DB OR already added in this file
-        if (existingSignatures.has(sig) || seenInThisImport.has(sig)) { duplicates++; continue }
-        seenInThisImport.add(sig)
 
         txns.push({
           user_id: viewingOs,
@@ -477,27 +422,22 @@ function App() {
           type: 'income',
           note: null,
           source: 'csv_import',
-          transaction_date: when,
+          transaction_date: r.when || nowIso,
         })
       }
 
       if (!txns.length) {
-        const parts = []
-        if (duplicates) parts.push(`${duplicates} duplicate(s)`)
-        if (skipped) parts.push(`${skipped} invalid`)
-        throw new Error(`Nothing to import${parts.length ? ` — ${parts.join(', ')}` : ''}.`)
+        throw new Error(`Nothing to import${skipped ? ` — ${skipped} invalid row(s)` : ''}.`)
       }
 
-      // 5. ✅ NEW: Batched inserts (500 per chunk to stay under Supabase limits)
+      // 4. Batched inserts (500 per chunk)
       const BATCH_SIZE = 500
       let inserted = 0
       for (let i = 0; i < txns.length; i += BATCH_SIZE) {
         const batch = txns.slice(i, i + BATCH_SIZE)
         const { error } = await supabase.from('transactions').insert(batch)
         if (error) {
-          throw new Error(
-            `Insert failed after ${inserted} row(s): ${error.message}`
-          )
+          throw new Error(`Insert failed after ${inserted} row(s): ${error.message}`)
         }
         inserted += batch.length
       }
@@ -505,7 +445,6 @@ function App() {
       const summary = [
         `Imported ${inserted} fare row(s)`,
         newDrivers.length ? `${newDrivers.length} new driver(s)` : null,
-        duplicates ? `${duplicates} duplicate(s) skipped` : null,
         skipped ? `${skipped} invalid skipped` : null,
       ].filter(Boolean).join(' · ')
 
@@ -570,7 +509,6 @@ function App() {
     return { income, distance, fares: filtered.length }
   }, [filtered])
 
-  // ✅ FIX: use driver_id (not name) for activeDrivers, and driver_id for plates via join
   const activeStats = useMemo(() => {
     const activePlateSet = new Set()
     const activeDriverIdSet = new Set()
@@ -595,8 +533,6 @@ function App() {
     const max = rows[0]?.total || 1
     return rows.map((r) => ({ ...r, pct: (r.total / max) * 100 }))
   }, [inRange])
-
-  // (Removed the 'daily' useMemo calculation as the chart is gone)
 
   function exportCsv() {
     const header = ['Date', 'Driver (Plate)', 'SAP Profile ID', 'Distance (km)', 'Payment Method', 'Amount']
@@ -786,8 +722,6 @@ function App() {
           </div>
         )}
 
-        {/* ❌ REMOVED: <section className="filters"> block was here */}
-
         <section className="stats" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
           <div className="stat stat-green">
             <span className="stat-label">Total Earnings</span>
@@ -830,7 +764,7 @@ function App() {
               <section className="card">
                 <h2>Import Data</h2>
                 <p className="muted" style={{ marginBottom: 15 }}>
-                  Upload your CSV to automatically read fares, distance, and payment methods. Duplicate rows (same driver, date, amount & distance) are skipped automatically.
+                  Upload your CSV to automatically read fares, distance, and payment methods. Every row is imported — nothing is skipped as a duplicate.
                 </p>
                 <div className="import-row">
                   <label className="import-label" style={{ border: '2px dashed var(--border)', padding: '20px', borderRadius: '8px', display: 'block', textAlign: 'center', cursor: 'pointer' }}>
@@ -944,7 +878,6 @@ function App() {
           </div>
 
           <div className="col">
-            {/* Chart removed here */}
             <section className="card">
               <h2>Driver leaderboard</h2>
               {leaderboard.length === 0 ? <p className="empty">No fares recorded.</p> : (
@@ -961,7 +894,6 @@ function App() {
           </div>
         </div>
 
-        {/* ✅ UPDATED: Transactions table now shows ALL filtered transactions, not just when a driver is selected */}
         <section className="card">
           <div className="card-head">
             <h2>{currentDriver ? `${currentDriver.name}'s Transactions` : 'Transactions'}</h2>
