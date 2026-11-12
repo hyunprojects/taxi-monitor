@@ -1,7 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
 
 /* =========================================================
-   TAXI REVENUE MONITOR — NEMINTSCO
+   NEMINTSCO DRIVER ATTENDANCE
    Soft grey canvas, black pill nav, one gradient hero card.
    Fully fluid: works from 320px phones up to wide desktops.
    ========================================================= */
@@ -22,6 +22,9 @@ body {
   --ok: #12805a;
   --err: #c93636;
   --warn: #f59e0b;
+
+  --present: #12805a;
+  --absent: #c93636;
 
   --grad: linear-gradient(150deg, #2c2668 0%, #6a3a6e 52%, #d4694a 100%);
 
@@ -47,6 +50,9 @@ body.dark-mode {
 
   --ok: #6fe0a6;
   --err: #ff8f8f;
+
+  --present: #6fe0a6;
+  --absent: #ff8f8f;
 }
 
 /* ---------- Base ---------- */
@@ -290,7 +296,7 @@ button, input, select { font-family: inherit; }
 
 @media (min-width: 980px) {
   .grid { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
-  .grid > .col:last-child { order: -1; } /* gradient leaderboard sits left, like the mockup */
+  .grid > .col:last-child { order: -1; } /* gradient hero sits left, like the mockup */
 }
 
 /* ---------- Cards ---------- */
@@ -313,7 +319,7 @@ button, input, select { font-family: inherit; }
 .muted { color: var(--muted); font-size: 0.85rem; }
 .empty { padding: 28px 0; text-align: center; font-size: 0.9rem; color: var(--muted); }
 
-/* ---------- Hero: gradient leaderboard ---------- */
+/* ---------- Hero: gradient card ---------- */
 .card-hero {
   position: relative;
   overflow: hidden;
@@ -390,31 +396,6 @@ button, input, select { font-family: inherit; }
   color: var(--ink);
 }
 
-.driver-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 420px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-}
-
-.driver-list li {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  background: var(--surface-2);
-  border-radius: var(--r-lg);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.driver-list li:hover { background: var(--nav-bg); color: var(--nav-ink); }
-.driver-list li:hover .muted { color: rgba(236, 236, 240, 0.65); }
-
 .avatar {
   flex: none;
   display: grid;
@@ -428,62 +409,6 @@ button, input, select { font-family: inherit; }
 }
 .grow { flex: 1; min-width: 0; }
 .grow > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.driver-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
-.driver-details > div { padding: 14px 16px; background: var(--surface-2); border-radius: var(--r-lg); }
-.driver-details strong { font-size: 0.78rem; font-weight: 500; color: var(--muted); }
-.driver-details p { margin: 4px 0 0; font-size: 1.1rem; overflow-wrap: anywhere; }
-
-/* ---------- Transactions table ---------- */
-.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-
-table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 0.88rem; }
-th {
-  padding: 10px 12px;
-  text-align: left;
-  font-size: 0.78rem;
-  font-weight: 500;
-  color: var(--muted);
-  white-space: nowrap;
-  border-bottom: 1px solid var(--border);
-}
-td { padding: 12px; white-space: nowrap; border-bottom: 1px solid var(--border); }
-tbody tr:hover td { background: var(--surface-2); }
-.num { text-align: right; }
-.pos { color: var(--ok); font-weight: 500; }
-
-.link-red {
-  padding: 6px 12px;
-  border: 0;
-  border-radius: 999px;
-  background: none;
-  color: var(--err);
-  font-size: 0.82rem;
-  cursor: pointer;
-}
-.link-red:hover { background: rgba(201, 54, 54, 0.14); }
-
-/* phones: each transaction becomes its own card (needs data-label on each <td>) */
-@media (max-width: 640px) {
-  .table-wrap { overflow: visible; }
-  table, tbody { display: block; min-width: 0; }
-  thead { display: none; }
-  tr { display: block; margin-bottom: 10px; padding: 6px 14px; background: var(--surface-2); border-radius: var(--r-lg); }
-  td {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 0;
-    border: 0;
-    white-space: normal;
-    text-align: right;
-  }
-  tbody tr:hover td { background: transparent; }
-  td::before { content: attr(data-label); flex: none; font-size: 0.76rem; color: var(--muted); text-align: left; }
-  td:last-child { justify-content: flex-end; border-top: 1px solid var(--border); margin-top: 4px; }
-  td:last-child::before { content: none; }
-}
 
 /* =========================================================
    AUTH (login, signup, pending, reset)
@@ -663,3 +588,143 @@ tbody tr:hover td { background: var(--surface-2); }
 .auth-solo-logo { display: block; width: 150px; height: auto; margin: 0 auto 22px; padding: 10px 14px; background: #fff; border-radius: 18px; }
 .auth-card-solo .field { text-align: left; }
 .auth-card-solo .auth-submit { background: #fff; color: #0d0d12; }
+
+/* =========================================================
+   ATTENDANCE CHECKLIST
+   ========================================================= */
+.stat .pos { color: var(--present); }
+.stat .neg { color: var(--absent); }
+.stat-green strong.pos, .stat-green strong.neg { color: inherit; }
+
+/* ---------- Date bar ---------- */
+.date-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding: 14px 18px;
+}
+.date-center { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+.date-center strong { font-size: 1.05rem; font-weight: 500; letter-spacing: -0.01em; }
+.date-center input[type='date'] {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+}
+.date-right { display: flex; gap: 8px; }
+
+.btn-soft {
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+}
+.btn-soft:hover:not(:disabled) { background: var(--nav-bg); color: var(--nav-ink); }
+
+@media (max-width: 560px) {
+  .date-bar { justify-content: center; }
+  .date-center { order: -1; flex-basis: 100%; }
+}
+
+/* ---------- Search + status filter ---------- */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 14px 18px; }
+.toolbar-search {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 9px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+.filter-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.pill.on { background: var(--nav-bg); color: var(--nav-ink); border-color: transparent; }
+
+/* ---------- Checklist ---------- */
+.os-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 1500px) { .os-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.check-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 640px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 14px;
+  background: var(--surface-2);
+  border-radius: var(--r-lg);
+  border-left: 4px solid transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+.check-row.present { border-left-color: var(--present); }
+.check-row.absent { border-left-color: var(--absent); }
+
+.check-row .grow { display: flex; flex-direction: column; gap: 2px; }
+.check-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check-sub { font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.seg { flex: none; display: flex; padding: 3px; gap: 3px; background: var(--surface); border-radius: 999px; }
+.seg-btn {
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.seg-btn:hover { color: var(--ink); }
+.seg-present.on { background: var(--present); color: #fff; }
+.seg-absent.on { background: var(--absent); color: #fff; }
+body.dark-mode .seg-present.on, body.dark-mode .seg-absent.on { color: #0c0c10; }
+
+/* phones: status buttons drop under the name so both stay big enough to tap */
+@media (max-width: 520px) {
+  .check-row { flex-wrap: wrap; }
+  .check-row .grow { flex: 1 1 calc(100% - 52px); }
+  .seg { width: 100%; }
+  .seg-btn { flex: 1; padding: 11px 14px; }
+  .check-sub { white-space: normal; }
+}
+
+/* ---------- Import card ---------- */
+.import-drop {
+  display: block;
+  padding: 20px;
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--r-lg);
+  text-align: center;
+  cursor: pointer;
+}
+.import-title { display: block; margin-bottom: 6px; font-weight: 600; }
+.import-hint { font-size: 0.85rem; color: var(--muted); }
+.danger-wide { width: 100%; margin-top: 12px; background: #dc2626; color: #fff; }

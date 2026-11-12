@@ -3,33 +3,39 @@ import { supabase } from './supabaseClient'
 import logo from './assets/neminstco.png'
 import './App.css'
 
-const CURRENCY = '₱'
-const RANGES = [
-  { key: 'today', label: 'Today' },
-  { key: '7d', label: '7 days' },
-  { key: '30d', label: '30 days' },
-  { key: 'all', label: 'All time' },
-  { key: 'custom', label: 'Custom' },
+/* ---------- The two OS. SAP ID starting digit decides who owns a driver. ---------- */
+const OS_LIST = [
+  { key: 'aldrin', label: 'Sir Aldrin', prefix: '1', match: 'aldrin' },
+  { key: 'arnel',  label: 'Sir Arnel',  prefix: '2', match: 'arnel'  },
 ]
+const osFromSap = (sap) => OS_LIST.find((o) => o.prefix === String(sap ?? '').trim().charAt(0))?.key || null
+const osLabel = (key) => OS_LIST.find((o) => o.key === key)?.label || 'Unassigned'
+const osFromName = (name) => {
+  const n = (name || '').toLowerCase()
+  return OS_LIST.find((o) => n.includes(o.match))?.key || null
+}
 
-const money = (n) =>
-  `${CURRENCY}${Number(n).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'present', label: 'Present' },
+  { key: 'absent', label: 'Absent' },
+  { key: 'unmarked', label: 'Unmarked' },
+]
 
 const dayKey = (d) => {
   const x = new Date(d)
   return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`
 }
-
-function rangeStart(key) {
-  const d = new Date()
-  d.setHours(0, 0, 0, 0)
-  if (key === 'today') return d
-  if (key === '7d') { d.setDate(d.getDate() - 6); return d }
-  if (key === '30d') { d.setDate(d.getDate() - 29); return d }
-  return null
+const shiftDay = (key, delta) => {
+  const [y, m, d] = key.split('-').map(Number)
+  return dayKey(new Date(y, m - 1, d + delta))
+}
+const prettyDay = (key) => {
+  const [y, m, d] = key.split('-').map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString('en-PH', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
 }
 
-/* ---------- CSV PARSER (orders.csv) ---------- */
+/* ---------- CSV PARSER: phone, name, plate number, sap id ---------- */
 function splitCsvLine(line) {
   const out = []
   let cur = ''
@@ -50,51 +56,33 @@ function splitCsvLine(line) {
   return out
 }
 
+const norm = (h) => h.toLowerCase().replace(/[^a-z0-9]/g, '')
+const ALIASES = {
+  phone: ['phone', 'phonenumber', 'driversphone', 'driverphone', 'mobile', 'mobilenumber', 'contact', 'contactnumber'],
+  name:  ['name', 'fullname', 'drivername', 'driversname'],
+  plate: ['plate', 'platenumber', 'plateno', 'vehicleplate', 'drivervehicleplate'],
+  sap:   ['sapid', 'sapprofileid', 'sap', 'sapno', 'sapnumber'],
+}
+
 function parseCsv(text) {
   const clean = text.replace(/^\uFEFF/, '')
   const lines = clean.trim().split(/\r?\n/)
-  const header = splitCsvLine(lines.shift()).map(h => h.trim())
+  const header = splitCsvLine(lines.shift()).map(norm)
+  const find = (k) => header.findIndex((h) => ALIASES[k].includes(h))
+  const idx = { phone: find('phone'), name: find('name'), plate: find('plate'), sap: find('sap') }
 
-  const need = ['Driver Vehicle Plate', 'Sap Profile Id', 'Distance']
-  if (!need.every(n => header.includes(n)))
-    throw new Error('CSV missing required columns: ' + need.join(', '))
+  const missing = ['name', 'sap'].filter((k) => idx[k] < 0)
+  if (missing.length) throw new Error(`CSV is missing column(s): ${missing.join(', ')}. Expected: Phone, Name, Plate Number, SAP ID.`)
 
-  const idx = {
-    plate:    header.indexOf('Driver Vehicle Plate'),
-    sapId:    header.indexOf('Sap Profile Id'),
-    distance: header.indexOf('Distance'),
-    payment:  header.findIndex(h => h.toLowerCase() === 'payment method'),
-    totalPay: header.findIndex(h => h.toLowerCase() === 'total pay display'),
-    date:     header.findIndex(h => ['date', 'transaction_date', 'datetime'].includes(h.toLowerCase())),
-  }
-
-  return lines.filter(l => l.trim()).map((line, i) => {
+  return lines.filter((l) => l.trim()).map((line, i) => {
     const c = splitCsvLine(line)
-    const plate = (c[idx.plate] || '').trim()
-    const sapId = parseInt((c[idx.sapId] || '').trim(), 10)
-    const distance = parseFloat((c[idx.distance] || '0').replace(/[^0-9.-]+/g, ''))
-
-    let paymentMethod = null
-    if (idx.payment >= 0 && c[idx.payment]) paymentMethod = c[idx.payment].trim() || null
-
-    let amount = distance
-    if (idx.totalPay >= 0 && c[idx.totalPay]) {
-      const parsed = parseFloat(c[idx.totalPay].replace(/[^0-9.-]+/g, ''))
-      if (Number.isFinite(parsed)) amount = parsed
-    }
-
-    let when = null
-    if (idx.date >= 0 && c[idx.date]) {
-      const parsed = new Date(c[idx.date].trim())
-      if (!isNaN(parsed.getTime())) when = parsed.toISOString()
-    }
-
-    if (!plate) throw new Error(`Row ${i + 2}: missing Driver Vehicle Plate`)
-    if (!Number.isFinite(sapId)) throw new Error(`Row ${i + 2}: invalid Sap Profile Id`)
-    if (!Number.isFinite(distance)) throw new Error(`Row ${i + 2}: invalid Distance`)
-    if (!Number.isFinite(amount)) throw new Error(`Row ${i + 2}: invalid Total Pay Display`)
-
-    return { plate, sapId, distance, amount, paymentMethod, when }
+    const get = (k) => (idx[k] >= 0 ? (c[idx[k]] || '').trim() : '')
+    const sapRaw = get('sap').replace(/[^0-9]/g, '')
+    const sap = parseInt(sapRaw, 10)
+    const name = get('name')
+    if (!name) throw new Error(`Row ${i + 2}: missing name`)
+    if (!Number.isFinite(sap)) throw new Error(`Row ${i + 2} (${name}): invalid SAP ID`)
+    return { name, sap, phone: get('phone') || null, plate: get('plate').toUpperCase() || null }
   })
 }
 
@@ -122,6 +110,52 @@ const AppleIcon = () => (
   </svg>
 )
 
+/* ---------- One OS checklist card ---------- */
+function Checklist({ title, drivers, attendance, onMark, onAllPresent, onClearDay, busy, emptyText }) {
+  const present = drivers.filter((d) => attendance[String(d.id)] === 'present').length
+  const absent = drivers.filter((d) => attendance[String(d.id)] === 'absent').length
+  return (
+    <section className="card">
+      <div className="card-head">
+        <div>
+          <h2>{title}</h2>
+          <span className="muted">{present} present · {absent} absent · {drivers.length - present - absent} unmarked</span>
+        </div>
+        {onAllPresent && (
+          <div className="check-actions">
+            <button type="button" className="btn btn-soft" onClick={onAllPresent} disabled={busy || !drivers.length}>All present</button>
+            <button type="button" className="btn btn-soft" onClick={onClearDay} disabled={busy || !drivers.length}>Reset</button>
+          </div>
+        )}
+      </div>
+      {drivers.length === 0 ? (
+        <p className="empty">{emptyText}</p>
+      ) : (
+        <ul className="check-list">
+          {drivers.map((d) => {
+            const s = attendance[String(d.id)] || null
+            return (
+              <li key={d.id} className={`check-row ${s || ''}`}>
+                <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
+                <div className="grow">
+                  <span className="check-name">{d.name}</span>
+                  <span className="muted check-sub">
+                    {d.plate_number || 'No plate'} · {d.phone || 'No phone'} · SAP {d.sap_profile_id}
+                  </span>
+                </div>
+                <div className="seg" role="group" aria-label={`Attendance for ${d.name}`}>
+                  <button type="button" className={`seg-btn seg-present ${s === 'present' ? 'on' : ''}`} aria-pressed={s === 'present'} onClick={() => onMark(d, 'present')}>Present</button>
+                  <button type="button" className={`seg-btn seg-absent ${s === 'absent' ? 'on' : ''}`} aria-pressed={s === 'absent'} onClick={() => onMark(d, 'absent')}>Absent</button>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 function App() {
   const [session, setSession] = useState(null)
   const [profile, setProfile] = useState(null)
@@ -132,17 +166,12 @@ function App() {
   const [recovering, setRecovering] = useState(false)
   const [newPassword, setNewPassword] = useState('')
 
-  const [allSupervisors, setAllSupervisors] = useState([])
-  const [viewingOs, setViewingOs] = useState('all')
-  const [selectedDriverId, setSelectedDriverId] = useState(null)
-
+  const [viewingOs, setViewingOs] = useState('all') // 'all' | 'aldrin' | 'arnel'
   const [drivers, setDrivers] = useState([])
-  const [transactions, setTransactions] = useState([])
+  const [attendance, setAttendance] = useState({}) // { [driverId]: 'present' | 'absent' }
+  const [attDate, setAttDate] = useState(() => dayKey(new Date()))
   const [loading, setLoading] = useState(false)
   const [notice, setNotice] = useState(null)
-
-  const [pendingClearTx, setPendingClearTx] = useState(false)
-  const [pendingClearDrivers, setPendingClearDrivers] = useState(false)
 
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme')
@@ -156,12 +185,8 @@ function App() {
   const [showPassword, setShowPassword] = useState(false)
   const [rememberMe, setRememberMe] = useState(() => !!localStorage.getItem('rememberedEmail'))
 
-  const [range, setRange] = useState('all')
-  const [customStart, setCustomStart] = useState('')
-  const [customEnd, setCustomEnd] = useState('')
-  const [driverFilter, setDriverFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
   const [search, setSearch] = useState('')
-  const [driverSearch, setDriverSearch] = useState('')
 
   /* ---------- Auth bootstrap ---------- */
   useEffect(() => {
@@ -191,12 +216,10 @@ function App() {
       if (error) { console.error(error); setProfile(null) }
       else if (data) {
         setProfile(data)
-        if (data.is_admin) {
-          const { data: osList } = await supabase
-            .from('profiles').select('id, full_name').eq('is_admin', false)
-          setAllSupervisors(osList || [])
+        if (data.approved) {
+          // Admin sees everyone. A supervisor is locked to their own list by name (Aldrin / Arnel).
+          setViewingOs(data.is_admin ? 'all' : (osFromName(data.full_name) || 'none'))
         }
-        if (data.approved) setViewingOs(data.is_admin ? 'all' : session.user.id)
       } else setProfile(null)
       setCheckingApproval(false)
     }
@@ -204,8 +227,12 @@ function App() {
   }, [session])
 
   useEffect(() => {
-    if (session && profile?.approved) { load(); setSelectedDriverId(null) }
+    if (session && profile?.approved && viewingOs !== 'none') loadDrivers()
   }, [session, profile, viewingOs])
+
+  useEffect(() => {
+    if (session && profile?.approved && viewingOs !== 'none') loadAttendance()
+  }, [session, profile, attDate])
 
   useEffect(() => {
     if (!notice) return
@@ -216,29 +243,22 @@ function App() {
   const ok = (text) => setNotice({ kind: 'ok', text })
   const fail = (text) => setNotice({ kind: 'error', text })
 
-  async function load() {
+  async function loadDrivers() {
     setLoading(true)
-    await Promise.all([fetchDrivers(), fetchTransactions()])
-    setLoading(false)
-  }
-
-  async function fetchDrivers() {
     let query = supabase.from('drivers').select('*').order('name')
-    if (viewingOs !== 'all') query = query.eq('user_id', viewingOs)
+    if (viewingOs !== 'all') query = query.eq('os', viewingOs)
     const { data, error } = await query
+    setLoading(false)
     if (error) return fail(`Could not load drivers: ${error.message}`)
     setDrivers(data || [])
   }
 
-  async function fetchTransactions() {
-    let query = supabase
-      .from('transactions')
-      .select('*, drivers(name, sap_profile_id, plate_number)')
-      .order('transaction_date', { ascending: false })
-    if (viewingOs !== 'all') query = query.eq('user_id', viewingOs)
-    const { data, error } = await query
-    if (error) return fail(`Could not load transactions: ${error.message}`)
-    setTransactions(data || [])
+  async function loadAttendance() {
+    const { data, error } = await supabase.from('attendance').select('driver_id, status').eq('attendance_date', attDate)
+    if (error) return fail(`Could not load attendance: ${error.message}`)
+    const map = {}
+    ;(data || []).forEach((r) => { map[String(r.driver_id)] = r.status })
+    setAttendance(map)
   }
 
   /* ---------- Auth actions ---------- */
@@ -264,18 +284,14 @@ function App() {
   async function handleForgotPassword() {
     setAuthError(null); setAuthInfo(null)
     if (!email.trim()) return setAuthError('Enter your email above first, then click "Forgot password?".')
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: window.location.origin,
-    })
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin })
     if (error) setAuthError(error.message)
     else setAuthInfo('Password reset link sent. Check your email.')
   }
 
   async function handleOAuth(provider) {
     setAuthError(null); setAuthInfo(null)
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider, options: { redirectTo: window.location.origin },
-    })
+    const { error } = await supabase.auth.signInWithOAuth({ provider, options: { redirectTo: window.location.origin } })
     if (error) setAuthError(error.message)
   }
 
@@ -288,168 +304,135 @@ function App() {
     setNewPassword(''); setRecovering(false); ok('Password updated.')
   }
 
-  /* ---------- CRUD ---------- */
-  async function deleteDriver(d) {
-    if (!window.confirm(`Delete ${d.name}? Their transactions may be removed too.`)) return
-    const { error } = await supabase.from('drivers').delete().eq('id', d.id)
-    if (error) return fail(`Could not delete ${d.name}: ${error.message}`)
-    if (driverFilter === String(d.id)) setDriverFilter('all')
-    if (selectedDriverId === String(d.id)) setSelectedDriverId(null)
-    ok(`${d.name} deleted.`)
-    load()
-  }
+  /* ---------- Attendance actions ---------- */
+  // Tap a status to set it; tap the same status again to clear it.
+  async function markDriver(d, status) {
+    const id = String(d.id)
+    const prev = attendance[id] || null
+    const next = prev === status ? null : status
 
-  async function deleteTransaction(id) {
-    if (!window.confirm('Delete this transaction?')) return
-    const { error } = await supabase.from('transactions').delete().eq('id', id)
-    if (error) return fail(error.message)
-    ok('Transaction deleted.')
-    fetchTransactions()
-  }
+    setAttendance((a) => {
+      const copy = { ...a }
+      if (next) copy[id] = next
+      else delete copy[id]
+      return copy
+    })
 
-  async function clearAllTransactions() {
-    if (viewingOs === 'all')
-      return fail('Select a specific Supervisor before clearing transactions.')
-    if (transactions.length === 0) { setPendingClearTx(false); return fail('There are no transactions to clear.') }
+    const { error } = next
+      ? await supabase.from('attendance').upsert(
+          { driver_id: d.id, attendance_date: attDate, status: next, marked_by: session.user.id, updated_at: new Date().toISOString() },
+          { onConflict: 'driver_id,attendance_date' }
+        )
+      : await supabase.from('attendance').delete().eq('driver_id', d.id).eq('attendance_date', attDate)
 
-    setLoading(true)
-    const { error } = await supabase.from('transactions').delete().eq('user_id', viewingOs)
-    setLoading(false); setPendingClearTx(false)
-
-    if (error) return fail(`Could not clear transactions: ${error.message}`)
-    ok(`Cleared ${transactions.length} transaction(s). Drivers kept.`)
-    load()
-  }
-
-  async function deleteAllDrivers() {
-    if (viewingOs === 'all')
-      return fail('Select a specific Supervisor before bulk deleting drivers.')
-    if (drivers.length === 0) { setPendingClearDrivers(false); return fail('There are no drivers to delete.') }
-
-    setLoading(true)
-    const { error: txError } = await supabase.from('transactions').delete().eq('user_id', viewingOs)
-    if (txError) {
-      setLoading(false); setPendingClearDrivers(false)
-      return fail(`Could not delete transactions: ${txError.message}`)
+    if (error) {
+      setAttendance((a) => {
+        const copy = { ...a }
+        if (prev) copy[id] = prev
+        else delete copy[id]
+        return copy
+      })
+      fail(`Could not save ${d.name}: ${error.message}`)
     }
-    const { error: driverError } = await supabase.from('drivers').delete().eq('user_id', viewingOs)
-    setLoading(false); setPendingClearDrivers(false)
-
-    if (driverError) return fail(`Could not delete drivers: ${driverError.message}`)
-    setDriverFilter('all'); setSelectedDriverId(null)
-    ok(`Deleted ${drivers.length} driver(s) and their transactions.`)
-    load()
   }
 
-  /* ---------- CSV IMPORT: every valid row is inserted, no dedup ---------- */
+  async function markAllPresent(list) {
+    if (!list.length) return
+    setLoading(true)
+    const rows = list.map((d) => ({
+      driver_id: d.id, attendance_date: attDate, status: 'present', marked_by: session.user.id, updated_at: new Date().toISOString(),
+    }))
+    const { error } = await supabase.from('attendance').upsert(rows, { onConflict: 'driver_id,attendance_date' })
+    setLoading(false)
+    if (error) return fail(`Could not mark all present: ${error.message}`)
+    ok(`Marked ${list.length} driver(s) present.`)
+    loadAttendance()
+  }
+
+  async function clearDay(list) {
+    if (!list.length) return
+    if (!window.confirm(`Reset attendance for ${list.length} driver(s) on ${prettyDay(attDate)}?`)) return
+    setLoading(true)
+    const { error } = await supabase.from('attendance').delete()
+      .eq('attendance_date', attDate).in('driver_id', list.map((d) => d.id))
+    setLoading(false)
+    if (error) return fail(`Could not reset: ${error.message}`)
+    ok('Attendance reset.')
+    loadAttendance()
+  }
+
+  /* ---------- Driver admin ---------- */
+  async function deleteAllDrivers() {
+    if (!drivers.length) return
+    const scope = viewingOs === 'all' ? 'ALL drivers' : `all of ${osLabel(viewingOs)}'s drivers`
+    if (!window.confirm(`Delete ${scope} (${drivers.length}) and their attendance records? This cannot be undone.`)) return
+    setLoading(true)
+    const ids = drivers.map((d) => d.id)
+    const { error: aErr } = await supabase.from('attendance').delete().in('driver_id', ids)
+    if (aErr) { setLoading(false); return fail(`Could not delete attendance: ${aErr.message}`) }
+    const { error: dErr } = await supabase.from('drivers').delete().in('id', ids)
+    setLoading(false)
+    if (dErr) return fail(`Could not delete drivers: ${dErr.message}`)
+    ok(`Deleted ${ids.length} driver(s).`)
+    loadDrivers(); loadAttendance()
+  }
+
+  /* ---------- CSV IMPORT: owner is decided by the SAP ID's first digit ---------- */
   async function importCsv(e) {
     const input = e.target
     const file = input.files[0]
     if (!file) return
     input.value = ''
-    if (viewingOs === 'all') return fail('Select a specific Supervisor before importing.')
 
     let rows
-    try {
-      rows = parseCsv(await file.text())
-    } catch (err) {
-      return fail(err.message)
-    }
+    try { rows = parseCsv(await file.text()) } catch (err) { return fail(err.message) }
     if (!rows.length) return fail('CSV is empty.')
 
     setLoading(true)
     try {
-      // 1. Fetch existing drivers so we can resolve driver_id for each row
-      const { data: existing, error: exErr } = await supabase
-        .from('drivers').select('id, sap_profile_id, name, plate_number').eq('user_id', viewingOs)
-      if (exErr) throw new Error(exErr.message)
-
-      const bySap = {}
-      const byPlate = {}
-      ;(existing || []).forEach(d => {
-        if (d.sap_profile_id) bySap[d.sap_profile_id] = d.id
-        if (d.plate_number) byPlate[d.plate_number.trim().toUpperCase()] = d.id
-        if (d.name) byPlate[d.name.trim().toUpperCase()] = d.id
-      })
-
-      // 2. Create drivers that don't exist yet.
-      //    We still dedupe drivers WITHIN this file, otherwise inserting the
-      //    same sap_profile_id twice would violate a unique constraint on drivers.
-      const newDrivers = []
-      const seenSap = new Set()
-      const seenPlate = new Set()
-
-      rows.forEach(r => {
-        const plateUpper = r.plate.trim().toUpperCase()
-        if (bySap[r.sapId] || byPlate[plateUpper]) return
-        if (seenSap.has(r.sapId) || seenPlate.has(plateUpper)) return
-        seenSap.add(r.sapId)
-        seenPlate.add(plateUpper)
-        newDrivers.push({
-          user_id: viewingOs,
-          sap_profile_id: r.sapId,
-          name: r.plate,
-          plate_number: r.plate,
-        })
-      })
-
-      if (newDrivers.length) {
-        const { data: created, error } = await supabase.from('drivers').insert(newDrivers).select()
-        if (error) throw new Error(error.message)
-        created.forEach(d => {
-          bySap[d.sap_profile_id] = d.id
-          if (d.plate_number) byPlate[d.plate_number.trim().toUpperCase()] = d.id
-        })
-      }
-
-      // 3. Build transactions — NO duplicate detection at all.
+      // Last row wins if the same SAP ID appears twice in the file.
+      const bySap = new Map()
       let skipped = 0
-      const txns = []
-      const nowIso = new Date().toISOString()
+      rows.forEach((r) => {
+        if (!osFromSap(r.sap)) { skipped++; return }
+        bySap.set(r.sap, { ...r, os: osFromSap(r.sap) })
+      })
+      const clean = [...bySap.values()]
+      if (!clean.length) throw new Error('No row has a SAP ID starting with 1 (Sir Aldrin) or 2 (Sir Arnel).')
 
-      for (const r of rows) {
-        const plateUpper = r.plate.trim().toUpperCase()
-        const driverId = bySap[r.sapId] || byPlate[plateUpper]
+      const { data: existing, error: exErr } = await supabase.from('drivers').select('id, sap_profile_id')
+      if (exErr) throw new Error(exErr.message)
+      const idBySap = {}
+      ;(existing || []).forEach((d) => { if (d.sap_profile_id != null) idBySap[d.sap_profile_id] = d.id })
 
-        if (!driverId || !Number.isFinite(r.amount)) { skipped++; continue }
+      const toInsert = []
+      const toUpdate = []
+      clean.forEach((r) => {
+        const payload = { sap_profile_id: r.sap, name: r.name, plate_number: r.plate, phone: r.phone, os: r.os }
+        if (idBySap[r.sap]) toUpdate.push({ id: idBySap[r.sap], payload })
+        else toInsert.push({ ...payload, user_id: session.user.id })
+      })
 
-        txns.push({
-          user_id: viewingOs,
-          driver_id: driverId,
-          amount: r.amount,
-          distance: r.distance,
-          payment_method: r.paymentMethod,
-          type: 'income',
-          note: null,
-          source: 'csv_import',
-          transaction_date: r.when || nowIso,
-        })
+      for (let i = 0; i < toInsert.length; i += 500) {
+        const { error } = await supabase.from('drivers').insert(toInsert.slice(i, i + 500))
+        if (error) throw new Error(`Insert failed: ${error.message}`)
+      }
+      for (let i = 0; i < toUpdate.length; i += 20) {
+        const results = await Promise.all(
+          toUpdate.slice(i, i + 20).map((u) => supabase.from('drivers').update(u.payload).eq('id', u.id))
+        )
+        const bad = results.find((r) => r.error)
+        if (bad) throw new Error(`Update failed: ${bad.error.message}`)
       }
 
-      if (!txns.length) {
-        throw new Error(`Nothing to import${skipped ? ` — ${skipped} invalid row(s)` : ''}.`)
-      }
-
-      // 4. Batched inserts (500 per chunk)
-      const BATCH_SIZE = 500
-      let inserted = 0
-      for (let i = 0; i < txns.length; i += BATCH_SIZE) {
-        const batch = txns.slice(i, i + BATCH_SIZE)
-        const { error } = await supabase.from('transactions').insert(batch)
-        if (error) {
-          throw new Error(`Insert failed after ${inserted} row(s): ${error.message}`)
-        }
-        inserted += batch.length
-      }
-
-      const summary = [
-        `Imported ${inserted} fare row(s)`,
-        newDrivers.length ? `${newDrivers.length} new driver(s)` : null,
-        skipped ? `${skipped} invalid skipped` : null,
-      ].filter(Boolean).join(' · ')
-
-      ok(summary)
-      load()
+      const perOs = OS_LIST.map((o) => `${clean.filter((r) => r.os === o.key).length} ${o.label}`).join(' · ')
+      ok([
+        `Imported ${clean.length} driver(s): ${perOs}`,
+        toInsert.length ? `${toInsert.length} new` : null,
+        toUpdate.length ? `${toUpdate.length} updated` : null,
+        skipped ? `${skipped} skipped (SAP ID not 1 or 2)` : null,
+      ].filter(Boolean).join(' · '))
+      loadDrivers()
     } catch (err) {
       fail(err.message)
     } finally {
@@ -458,96 +441,52 @@ function App() {
   }
 
   /* ---------- Derived data ---------- */
-
-  const filteredDrivers = useMemo(() => {
-    if (!driverSearch.trim()) return drivers
-    const q = driverSearch.toLowerCase()
-    return drivers.filter(d =>
-      (d.name && d.name.toLowerCase().includes(q)) ||
-      (d.plate_number && d.plate_number.toLowerCase().includes(q)) ||
-      (d.sap_profile_id && String(d.sap_profile_id).includes(q))
-    )
-  }, [drivers, driverSearch])
-
-  const inRange = useMemo(() => {
-    let base = transactions
-    if (selectedDriverId) base = base.filter((t) => String(t.driver_id) === selectedDriverId)
-    if (range === 'custom') {
-      if (!customStart && !customEnd) return base
-      return base.filter((t) => {
-        const d = dayKey(t.transaction_date)
-        if (customStart && d < customStart) return false
-        if (customEnd && d > customEnd) return false
-        return true
-      })
-    }
-    const start = rangeStart(range)
-    return base.filter((t) => !start || new Date(t.transaction_date) >= start)
-  }, [transactions, range, customStart, customEnd, selectedDriverId])
-
-  const filtered = useMemo(() => {
+  const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
-    return inRange.filter((t) => {
-      if (selectedDriverId) {
-        return String(t.driver_id) === selectedDriverId && (
-          !q || [t.drivers?.name, t.note, t.payment_method].some((v) => v && v.toLowerCase().includes(q))
-        )
-      }
-      if (driverFilter !== 'all' && String(t.driver_id) !== driverFilter) return false
+    return drivers.filter((d) => {
+      const s = attendance[String(d.id)] || 'unmarked'
+      if (statusFilter !== 'all' && s !== statusFilter) return false
       if (!q) return true
-      return [t.drivers?.name, t.note, t.payment_method].some((v) => v && v.toLowerCase().includes(q))
+      return [d.name, d.plate_number, d.phone, String(d.sap_profile_id ?? '')].some((v) => v && v.toLowerCase().includes(q))
     })
-  }, [inRange, driverFilter, search, selectedDriverId])
+  }, [drivers, attendance, statusFilter, search])
 
-  const stats = useMemo(() => {
-    let income = 0
-    let distance = 0
-    filtered.forEach((t) => {
-      income += Number(t.amount) || 0
-      distance += Number(t.distance) || 0
+  const totals = useMemo(() => {
+    let present = 0, absent = 0
+    drivers.forEach((d) => {
+      const s = attendance[String(d.id)]
+      if (s === 'present') present++
+      else if (s === 'absent') absent++
     })
-    return { income, distance, fares: filtered.length }
-  }, [filtered])
+    return { total: drivers.length, present, absent, unmarked: drivers.length - present - absent }
+  }, [drivers, attendance])
 
-  const activeStats = useMemo(() => {
-    const activePlateSet = new Set()
-    const activeDriverIdSet = new Set()
-    filtered.forEach((t) => {
-      if (t.drivers?.plate_number) activePlateSet.add(t.drivers.plate_number.trim().toUpperCase())
-      if (t.driver_id) activeDriverIdSet.add(String(t.driver_id))
+  const perOs = useMemo(() => {
+    const rows = OS_LIST.map((o) => {
+      const list = drivers.filter((d) => d.os === o.key)
+      const present = list.filter((d) => attendance[String(d.id)] === 'present').length
+      return { key: o.key, label: o.label, total: list.length, present, pct: list.length ? (present / list.length) * 100 : 0 }
     })
-    return {
-      activeCars: activePlateSet.size,
-      activeDrivers: activeDriverIdSet.size,
-      trips: filtered.length,
-    }
-  }, [filtered])
+    return rows.filter((r) => viewingOs === 'all' || r.key === viewingOs)
+  }, [drivers, attendance, viewingOs])
 
-  const leaderboard = useMemo(() => {
-    const map = {}
-    inRange.forEach((t) => {
-      const name = t.drivers?.name || 'Unknown'
-      map[name] = (map[name] || 0) + Number(t.amount)
-    })
-    const rows = Object.entries(map).map(([name, total]) => ({ name, total })).sort((a, b) => b.total - a.total)
-    const max = rows[0]?.total || 1
-    return rows.map((r) => ({ ...r, pct: (r.total / max) * 100 }))
-  }, [inRange])
+  const groups = useMemo(() => {
+    const keys = viewingOs === 'all' ? [...OS_LIST.map((o) => o.key), null] : [viewingOs]
+    return keys
+      .map((k) => ({ key: k || 'unassigned', title: k ? osLabel(k) : 'Unassigned drivers', list: visible.filter((d) => (d.os || null) === k) }))
+      .filter((g) => g.key !== 'unassigned' || g.list.length > 0)
+  }, [visible, viewingOs])
 
   function exportCsv() {
-    const header = ['Date', 'Driver (Plate)', 'SAP Profile ID', 'Distance (km)', 'Payment Method', 'Amount']
-    const rows = filtered.map((t) => [
-      new Date(t.transaction_date).toLocaleString(),
-      t.drivers?.name || '',
-      t.drivers?.sap_profile_id ?? '',
-      Number(t.distance ?? 0).toFixed(2),
-      t.payment_method || '',
-      Number(t.amount).toFixed(2),
+    const header = ['Date', 'OS', 'Name', 'Plate Number', 'Phone', 'SAP ID', 'Status']
+    const rows = drivers.map((d) => [
+      attDate, osLabel(d.os), d.name, d.plate_number || '', d.phone || '', d.sap_profile_id ?? '',
+      attendance[String(d.id)] || 'unmarked',
     ])
     const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n')
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
     const a = document.createElement('a')
-    a.href = url; a.download = `taxi-report-${dayKey(new Date())}.csv`; a.click()
+    a.href = url; a.download = `attendance-${attDate}.csv`; a.click()
     URL.revokeObjectURL(url)
   }
 
@@ -607,14 +546,14 @@ function App() {
         <aside className="auth-brand">
           <img src={logo} alt="NEMINTSCO, powered by Green GSM" className="auth-logo" />
           <div className="auth-tagline">
-            <h2>Every Fare,<br /><span>Clearly Tracked.</span></h2>
-            <p>A simple, reliable fleet monitor for revenue, expenses and driver performance, built for NEMINTSCO.</p>
+            <h2>Every Driver,<br /><span>Accounted For.</span></h2>
+            <p>A simple daily attendance checklist for Sir Aldrin's and Sir Arnel's drivers, built for NEMINTSCO.</p>
           </div>
         </aside>
         <div className="auth-panel">
           <div className="auth-card">
             <h1>{isLogin ? 'Welcome Back!' : 'Create Account'}</h1>
-            <p className="auth-sub">{isLogin ? 'Welcome back! Please enter your details!' : 'Sign up to start tracking fares and expenses.'}</p>
+            <p className="auth-sub">{isLogin ? 'Welcome back! Please enter your details!' : 'Sign up to start checking driver attendance.'}</p>
             {authError && <div className="notice notice-error">{authError}</div>}
             {authInfo && <div className="notice notice-ok">{authInfo}</div>}
             <form onSubmit={handleAuth} className="auth-form">
@@ -672,14 +611,9 @@ function App() {
   }
 
   /* ---------- Render: dashboard ---------- */
-  const isViewingAll = viewingOs === 'all'
-  const currentDriver = selectedDriverId ? drivers.find((d) => String(d.id) === selectedDriverId) : null
-
-  let viewTitle = 'All Operations'
-  if (currentDriver) viewTitle = `Driver: ${currentDriver.name}`
-  else if (!isViewingAll) viewTitle = (viewingOs === session.user.id ? profile?.full_name : allSupervisors.find((s) => s.id === viewingOs)?.full_name)
-
-  const canBulkDelete = !isViewingAll
+  const isAdmin = !!profile?.is_admin
+  const isToday = attDate === dayKey(new Date())
+  const noOsMatch = viewingOs === 'none'
 
   return (
     <div className="app">
@@ -688,25 +622,18 @@ function App() {
           <div className="brand">
             <img src={logo} alt="NEMINTSCO" className="brand-logo" />
             <div>
-              <h1>
-                Dashboard: <span>{viewTitle}</span>
-                {currentDriver && (
-                  <button className="back-btn" onClick={() => setSelectedDriverId(null)}>← Back</button>
-                )}
-              </h1>
-              <p>{profile?.is_admin ? 'Admin Access' : 'Supervisor Access'} • {session.user.email}</p>
+              <h1>Attendance: <span>{viewingOs === 'all' ? 'All Drivers' : noOsMatch ? 'No list' : osLabel(viewingOs)}</span></h1>
+              <p>{isAdmin ? 'Admin Access' : 'Supervisor Access'} • {session.user.email}</p>
             </div>
           </div>
           <div className="header-actions">
-            {profile?.is_admin && (
+            {isAdmin && (
               <select className="admin-select" value={viewingOs} onChange={(e) => setViewingOs(e.target.value)}>
-                <option value="all">View All Supervisors</option>
-                {allSupervisors.map((os) => (
-                  <option key={os.id} value={os.id}>{os.full_name || 'Unnamed OS'}</option>
-                ))}
+                <option value="all">View Both OS</option>
+                {OS_LIST.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
               </select>
             )}
-            <button className="btn btn-ghost" onClick={exportCsv} disabled={!filtered.length}>Export CSV</button>
+            <button className="btn btn-ghost" onClick={exportCsv} disabled={!drivers.length}>Export CSV</button>
             <button className="btn btn-ghost theme-toggle" onClick={() => setIsDark(!isDark)}>{isDark ? '☀️ Light' : '🌙 Dark'}</button>
             <button className="btn btn-ghost" onClick={() => supabase.auth.signOut()}>Log Out</button>
           </div>
@@ -716,235 +643,118 @@ function App() {
       <main className="container">
         {notice && <div className={`notice notice-${notice.kind}`}>{notice.text}</div>}
 
-        {isViewingAll && (
+        {noOsMatch && (
           <div className="admin-warning">
-            ⚠️ You are viewing the combined data of all Supervisors. To import CSV data, please select a specific Supervisor from the top right dropdown.
+            ⚠️ Your account name doesn't match Sir Aldrin or Sir Arnel, so there is no driver list to show. Ask an admin to set your full name to include "Aldrin" or "Arnel".
           </div>
         )}
 
-        <section className="stats" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-          <div className="stat stat-green">
-            <span className="stat-label">Total Earnings</span>
-            <strong>{money(stats.income)}</strong>
-            <small>{stats.fares} fare{stats.fares === 1 ? '' : 's'} recorded</small>
-          </div>
-          <div className="stat">
-            <span className="stat-label">Total Distance</span>
-            <strong>{stats.distance.toFixed(2)} km</strong>
-            <small>Sum of trip distances</small>
-          </div>
-          <div className="stat">
-            <span className="stat-label">Avg Fare</span>
-            <strong>{money(stats.fares ? stats.income / stats.fares : 0)}</strong>
-            <small>Per transaction</small>
-          </div>
-        </section>
+        {!noOsMatch && (
+          <>
+            <section className="card date-bar">
+              <button type="button" className="btn btn-soft" onClick={() => setAttDate(shiftDay(attDate, -1))} aria-label="Previous day">← Prev</button>
+              <div className="date-center">
+                <strong>{prettyDay(attDate)}</strong>
+                <input type="date" value={attDate} max={dayKey(new Date())} onChange={(e) => e.target.value && setAttDate(e.target.value)} aria-label="Pick a date" />
+              </div>
+              <div className="date-right">
+                {!isToday && <button type="button" className="btn btn-soft" onClick={() => setAttDate(dayKey(new Date()))}>Today</button>}
+                <button type="button" className="btn btn-soft" onClick={() => setAttDate(shiftDay(attDate, 1))} disabled={isToday} aria-label="Next day">Next →</button>
+              </div>
+            </section>
 
-        <section className="stats" style={{ gridTemplateColumns: 'repeat(3, 1fr)', marginTop: '-10px' }}>
-          <div className="stat">
-            <span className="stat-label">Active Cars</span>
-            <strong>{activeStats.activeCars}</strong>
-            <small>Plate numbers with transactions</small>
-          </div>
-          <div className="stat">
-            <span className="stat-label">Active Drivers</span>
-            <strong>{activeStats.activeDrivers}</strong>
-            <small>Drivers with transactions</small>
-          </div>
-          <div className="stat">
-            <span className="stat-label">Trips</span>
-            <strong>{activeStats.trips}</strong>
-            <small>Total transactions</small>
-          </div>
-        </section>
+            <section className="stats">
+              <div className="stat stat-green">
+                <span className="stat-label">Total Drivers</span>
+                <strong>{totals.total}</strong>
+                <small>{totals.unmarked} not yet marked</small>
+              </div>
+              <div className="stat">
+                <span className="stat-label">Present</span>
+                <strong className="pos">{totals.present}</strong>
+                <small>{totals.total ? Math.round((totals.present / totals.total) * 100) : 0}% of drivers</small>
+              </div>
+              <div className="stat">
+                <span className="stat-label">Absent</span>
+                <strong className="neg">{totals.absent}</strong>
+                <small>{totals.total ? Math.round((totals.absent / totals.total) * 100) : 0}% of drivers</small>
+              </div>
+            </section>
 
-        <div className="grid">
-          <div className="col">
-            {!isViewingAll && !currentDriver && (
-              <section className="card">
-                <h2>Import Data</h2>
-                <p className="muted" style={{ marginBottom: 15 }}>
-                  Upload your CSV to automatically read fares, distance, and payment methods. Every row is imported — nothing is skipped as a duplicate.
-                </p>
-                <div className="import-row">
-                  <label className="import-label" style={{ border: '2px dashed var(--border)', padding: '20px', borderRadius: '8px', display: 'block', textAlign: 'center', cursor: 'pointer' }}>
-                    <span className="import-title" style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>
-                      {loading ? 'Importing…' : 'Click to Upload CSV'}
-                    </span>
-                    <span className="import-hint" style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
-                      Required: Driver Vehicle Plate, Sap Profile Id, Distance, Total Pay Display
-                    </span>
-                    <input type="file" accept=".csv,text/csv" onChange={importCsv} disabled={loading} style={{ display: 'none' }} />
-                  </label>
-                </div>
-              </section>
-            )}
-
-            <section className="card">
-              <div className="card-head" style={{ flexWrap: 'wrap', gap: 8 }}>
-                <h2>{currentDriver ? 'Driver Details' : 'Total Drivers Overview'}</h2>
-                {!currentDriver && (
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <input
-                      type="search"
-                      placeholder="Search name/plate..."
-                      value={driverSearch}
-                      onChange={(e) => setDriverSearch(e.target.value)}
-                      style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border)', fontSize: '0.85rem', minWidth: '200px' }}
-                    />
-                    <button
-                      type="button"
-                      className="btn btn-warning"
-                      onClick={() => setPendingClearTx(true)}
-                      disabled={loading || !canBulkDelete || transactions.length === 0}
-                      title={canBulkDelete ? 'Remove all transactions but keep drivers' : 'Select a specific supervisor first'}
-                      style={{ background: '#f59e0b', color: '#1a1a1a', border: 'none', padding: '6px 12px', borderRadius: 6, fontWeight: 500, fontSize: '0.85rem', cursor: canBulkDelete && !loading ? 'pointer' : 'not-allowed', opacity: canBulkDelete && !loading ? 1 : 0.5 }}
-                    >
-                      🧹 Clear Transactions ({transactions.length})
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-danger"
-                      onClick={() => setPendingClearDrivers(true)}
-                      disabled={loading || !canBulkDelete || drivers.length === 0}
-                      title={canBulkDelete ? 'Delete all drivers and their transactions' : 'Select a specific supervisor first'}
-                      style={{ background: '#dc2626', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontWeight: 500, fontSize: '0.85rem', cursor: canBulkDelete && !loading ? 'pointer' : 'not-allowed', opacity: canBulkDelete && !loading ? 1 : 0.5 }}
-                    >
-                      🗑️ Delete All Drivers ({drivers.length})
-                    </button>
+            <div className="grid">
+              <div className="col">
+                <section className="card toolbar">
+                  <input
+                    type="search"
+                    className="toolbar-search"
+                    placeholder="Search name, plate, phone or SAP ID…"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                  <div className="filter-pills" role="group" aria-label="Filter by status">
+                    {FILTERS.map((f) => (
+                      <button key={f.key} type="button" className={`pill ${statusFilter === f.key ? 'on' : ''}`} onClick={() => setStatusFilter(f.key)}>
+                        {f.label}
+                      </button>
+                    ))}
                   </div>
-                )}
+                </section>
+
+                <div className={viewingOs === 'all' ? 'os-grid' : ''}>
+                  {groups.map((g) => {
+                    const full = drivers.filter((d) => (d.os || 'unassigned') === g.key)
+                    return (
+                      <Checklist
+                        key={g.key}
+                        title={g.title}
+                        drivers={g.list}
+                        attendance={attendance}
+                        onMark={markDriver}
+                        busy={loading}
+                        onAllPresent={g.key === 'unassigned' ? null : () => markAllPresent(full)}
+                        onClearDay={() => clearDay(full)}
+                        emptyText={drivers.length === 0 ? 'No drivers yet. Import a CSV to get started.' : 'No drivers match the current filters.'}
+                      />
+                    )
+                  })}
+                </div>
               </div>
 
-              {pendingClearTx && (
-                <div style={{ marginBottom: 12, padding: 12, background: 'rgba(245,158,11,0.12)', border: '1px solid #f59e0b', borderRadius: 8 }}>
-                  <p style={{ margin: '0 0 10px', fontWeight: 500 }}>
-                    Delete all <b>{transactions.length}</b> transactions for this supervisor? Drivers will be kept.
+              <div className="col">
+                <section className="card card-hero">
+                  <h2>Attendance rate</h2>
+                  {perOs.every((r) => r.total === 0) ? <p className="empty">No drivers yet.</p> : (
+                    <ol className="leaderboard">
+                      {perOs.map((r) => (
+                        <li key={r.key}>
+                          <div className="lb-row"><span>{r.label}</span><strong>{r.present} / {r.total} present</strong></div>
+                          <div className="track"><div className="fill" style={{ width: `${r.pct}%` }} /></div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </section>
+
+                <section className="card">
+                  <h2>Import drivers</h2>
+                  <p className="muted" style={{ marginBottom: 15 }}>
+                    Columns: Phone, Name, Plate Number, SAP ID. A SAP ID starting with <b>1</b> goes to Sir Aldrin, <b>2</b> goes to Sir Arnel. Re-importing updates existing drivers by SAP ID.
                   </p>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn" onClick={clearAllTransactions} disabled={loading}
-                      style={{ background: '#f59e0b', color: '#1a1a1a', border: 'none', padding: '6px 12px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}>
-                      Yes, clear transactions
+                  <label className="import-label import-drop">
+                    <span className="import-title">{loading ? 'Working…' : 'Click to upload CSV'}</span>
+                    <span className="import-hint">Phone, Name, Plate Number, SAP ID</span>
+                    <input type="file" accept=".csv,text/csv" onChange={importCsv} disabled={loading} style={{ display: 'none' }} />
+                  </label>
+                  {isAdmin && (
+                    <button type="button" className="btn btn-danger danger-wide" onClick={deleteAllDrivers} disabled={loading || !drivers.length}>
+                      🗑️ Delete {viewingOs === 'all' ? 'all' : osLabel(viewingOs) + "'s"} drivers ({drivers.length})
                     </button>
-                    <button className="btn btn-ghost" onClick={() => setPendingClearTx(false)} disabled={loading}>Cancel</button>
-                  </div>
-                </div>
-              )}
-
-              {pendingClearDrivers && (
-                <div style={{ marginBottom: 12, padding: 12, background: 'rgba(220,38,38,0.12)', border: '1px solid #dc2626', borderRadius: 8 }}>
-                  <p style={{ margin: '0 0 10px', fontWeight: 500 }}>
-                    Delete all <b>{drivers.length}</b> drivers AND their transactions? This cannot be undone.
-                  </p>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn" onClick={deleteAllDrivers} disabled={loading}
-                      style={{ background: '#dc2626', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}>
-                      Yes, delete everything
-                    </button>
-                    <button className="btn btn-ghost" onClick={() => setPendingClearDrivers(false)} disabled={loading}>Cancel</button>
-                  </div>
-                </div>
-              )}
-
-              {currentDriver ? (
-                <div className="driver-details">
-                  <div><strong>Plate Number</strong><p>{currentDriver.plate_number || currentDriver.name}</p></div>
-                  <div><strong>Driver Name</strong><p>{currentDriver.name}</p></div>
-                </div>
-              ) : (
-                <>
-                  <p className="muted" style={{ marginTop: 0 }}>
-                    {isViewingAll ? 'Showing all drivers under all supervisors.' : 'Click a driver to filter their transactions.'}
-                  </p>
-                  <ul className="driver-list">
-                    {filteredDrivers.map((d) => (
-                      <li key={d.id} onClick={() => setSelectedDriverId(String(d.id))} className="driver-item-hover">
-                        <span className="avatar">{d.name.charAt(0).toUpperCase()}</span>
-                        <div className="grow" style={{ display: 'flex', flexDirection: 'column' }}>
-                          <span style={{ fontWeight: 600 }}>{d.name}</span>
-                          <span className="muted" style={{ fontSize: '0.8rem' }}>
-                            Plate: {d.plate_number || (d.name && d.name.startsWith('NJY') ? d.name : '—')}
-                          </span>
-                        </div>
-                      </li>
-                    ))}
-                    {filteredDrivers.length === 0 && (
-                      <p className="muted" style={{ fontSize: '0.9rem', marginTop: '10px' }}>No drivers match your search.</p>
-                    )}
-                  </ul>
-                </>
-              )}
-            </section>
-          </div>
-
-          <div className="col">
-            <section className="card">
-              <h2>Driver leaderboard</h2>
-              {leaderboard.length === 0 ? <p className="empty">No fares recorded.</p> : (
-                <ol className="leaderboard">
-                  {leaderboard.map((r, i) => (
-                    <li key={r.name}>
-                      <div className="lb-row"><span>{i + 1}. {r.name}</span><strong>{money(r.total)}</strong></div>
-                      <div className="track"><div className="fill" style={{ width: `${r.pct}%` }} /></div>
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </section>
-          </div>
-        </div>
-
-        <section className="card">
-          <div className="card-head">
-            <h2>{currentDriver ? `${currentDriver.name}'s Transactions` : 'Transactions'}</h2>
-            <span className="muted">
-              {filtered.length} shown
-              {!currentDriver && driverFilter !== 'all' && drivers.find(d => String(d.id) === driverFilter) && (
-                <> · filtered to <b>{drivers.find(d => String(d.id) === driverFilter).name}</b></>
-              )}
-            </span>
-          </div>
-
-          {loading ? (
-            <p className="empty">Loading…</p>
-          ) : filtered.length === 0 ? (
-            <p className="empty">
-              No transactions match the current filters.
-              {!isViewingAll && ' Try importing a CSV or widening the date range.'}
-            </p>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Driver (Plate)</th>
-                    <th>Plate Number</th>
-                    <th className="num">Distance</th>
-                    <th>Payment</th>
-                    <th className="num">Amount</th>
-                    <th className="num">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((t) => (
-                    <tr key={t.id}>
-                      <td>{new Date(t.transaction_date).toLocaleString()}</td>
-                      <td>{t.drivers?.name || 'Unknown'}</td>
-                      <td>{t.drivers?.plate_number || '—'}</td>
-                      <td className="num">{Number(t.distance ?? 0).toFixed(2)} km</td>
-                      <td style={{ textTransform: 'capitalize' }}>{t.payment_method?.replace(/_/g, ' ') || '—'}</td>
-                      <td className="num pos">+{money(t.amount)}</td>
-                      <td className="num">
-                        <button className="link-red" onClick={() => deleteTransaction(t.id)}>Delete</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                  )}
+                </section>
+              </div>
             </div>
-          )}
-        </section>
+          </>
+        )}
       </main>
     </div>
   )
