@@ -295,8 +295,8 @@ button, input, select { font-family: inherit; }
 .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 
 @media (min-width: 980px) {
-  .grid { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
-  .grid > .col:last-child { order: -1; } /* gradient hero sits left, like the mockup */
+  /* checklists get the wide column; hero + import sit on the right */
+  .grid { grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr); }
 }
 
 /* ---------- Cards ---------- */
@@ -656,8 +656,7 @@ button, input, select { font-family: inherit; }
 .pill.on { background: var(--nav-bg); color: var(--nav-ink); border-color: transparent; }
 
 /* ---------- Checklist ---------- */
-.os-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
-@media (min-width: 1500px) { .os-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.os-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); } /* Aldrin and Arnel stacked, full width */
 
 .check-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
